@@ -136,9 +136,7 @@
 						<configuration>
 							<sourceDirectory>${basedir}/src/main/javacc</sourceDirectory>
 							<includes>
-<!--
-								<include>**/Parser.jj</include>
--->
+								<include>**/SimpleSelectParser.jj</include>
 							</includes>
 							<outputDirectory>${basedir}/generated-sources/</outputDirectory>
 						</configuration>

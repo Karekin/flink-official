@@ -43,5 +43,5 @@ rest.address: localhost
 rest.bind-address: localhost
 pekko.ask.timeout: 3000000
 #心跳参数
-heartbeat.timeout: 3000000
-heartbeat.interval: 3000000
+heartbeat.timeout: 50000
+heartbeat.interval: 10000
