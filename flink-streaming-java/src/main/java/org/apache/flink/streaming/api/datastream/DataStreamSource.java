@@ -64,6 +64,7 @@ public class DataStreamSource<T> extends SingleOutputStreamOperator<T> {
             Boundedness boundedness) {
         super(
                 environment,
+                // 遗留源转换
                 new LegacySourceTransformation<>(
                         sourceName,
                         operator,

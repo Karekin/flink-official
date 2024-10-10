@@ -834,7 +834,7 @@ public class StreamingJobGraphGenerator {
          * 并检查这个起始节点是否已经被构建（即是否在builtVertices中
          */
         if (!builtVertices.contains(startNodeId)) {
-            /** 物理出边 */
+            /** 物理出边（transitive的意思是“传递性”，在图结构中，节点通过传递性关系所能连接到的出边。） */
             List<StreamEdge> transitiveOutEdges = new ArrayList<StreamEdge>();
             /** 存放可以被链接的出边列表 */
             List<StreamEdge> chainableOutputs = new ArrayList<StreamEdge>();
@@ -1970,7 +1970,7 @@ public class StreamingJobGraphGenerator {
         boolean isChainable;
         /**
          * 5.下游的ChainingStrategy为ALWAYS
-         * 6.上有的ChainingStrategy为ALWAYS、HEAD、HEAD_WITH_SOURCES
+         * 6.上游的ChainingStrategy为ALWAYS、HEAD、HEAD_WITH_SOURCES
          * 7.上下游并行度必须一致
          */
         switch (upStreamOperator.getChainingStrategy()) {

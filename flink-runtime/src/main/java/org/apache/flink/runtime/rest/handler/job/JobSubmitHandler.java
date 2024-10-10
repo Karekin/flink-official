@@ -138,7 +138,7 @@ public final class JobSubmitHandler
          */
         Collection<Path> jarFiles = getJarFilesToUpload(requestBody.jarFileNames, nameToFile);
         /**
-         * 调用getArtifactFilesToUpload方法获取每个缓存文件对应的Path路径
+         * 调用getArtifactFilesToUpload方法获取每个缓存文件（a_conf/a.txt）对应的Path路径
          */
         Collection<Tuple2<String, Path>> artifacts =
                 getArtifactFilesToUpload(requestBody.artifactFileNames, nameToFile);
