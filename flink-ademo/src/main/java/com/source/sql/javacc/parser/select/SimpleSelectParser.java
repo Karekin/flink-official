@@ -84,12 +84,12 @@ public class SimpleSelectParser implements SimpleSelectParserConstants {
    }
 
   /** Constructor with InputStream. */
-  public SimpleSelectParser(InputStream stream) {
+  public SimpleSelectParser(java.io.InputStream stream) {
      this(stream, null);
   }
   /** Constructor with InputStream and supplied encoding */
-  public SimpleSelectParser(InputStream stream, String encoding) {
-    try { jj_input_stream = new SimpleCharStream(stream, encoding, 1, 1); } catch(UnsupportedEncodingException e) { throw new RuntimeException(e); }
+  public SimpleSelectParser(java.io.InputStream stream, String encoding) {
+    try { jj_input_stream = new SimpleCharStream(stream, encoding, 1, 1); } catch(java.io.UnsupportedEncodingException e) { throw new RuntimeException(e); }
     token_source = new SimpleSelectParserTokenManager(jj_input_stream);
     token = new Token();
     jj_ntk = -1;
@@ -98,12 +98,12 @@ public class SimpleSelectParser implements SimpleSelectParserConstants {
   }
 
   /** Reinitialise. */
-  public void ReInit(InputStream stream) {
+  public void ReInit(java.io.InputStream stream) {
      ReInit(stream, null);
   }
   /** Reinitialise. */
-  public void ReInit(InputStream stream, String encoding) {
-    try { jj_input_stream.ReInit(stream, encoding, 1, 1); } catch(UnsupportedEncodingException e) { throw new RuntimeException(e); }
+  public void ReInit(java.io.InputStream stream, String encoding) {
+    try { jj_input_stream.ReInit(stream, encoding, 1, 1); } catch(java.io.UnsupportedEncodingException e) { throw new RuntimeException(e); }
     token_source.ReInit(jj_input_stream);
     token = new Token();
     jj_ntk = -1;
@@ -112,7 +112,7 @@ public class SimpleSelectParser implements SimpleSelectParserConstants {
   }
 
   /** Constructor. */
-  public SimpleSelectParser(Reader stream) {
+  public SimpleSelectParser(java.io.Reader stream) {
     jj_input_stream = new SimpleCharStream(stream, 1, 1);
     token_source = new SimpleSelectParserTokenManager(jj_input_stream);
     token = new Token();
@@ -122,7 +122,7 @@ public class SimpleSelectParser implements SimpleSelectParserConstants {
   }
 
   /** Reinitialise. */
-  public void ReInit(Reader stream) {
+  public void ReInit(java.io.Reader stream) {
     jj_input_stream.ReInit(stream, 1, 1);
     token_source.ReInit(jj_input_stream);
     token = new Token();
