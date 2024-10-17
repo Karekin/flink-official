@@ -81,7 +81,7 @@ public class SqlNodeConverters {
         }
 
         // match by kind if no matching items in class converters
-        // 如果没有找到类转换器，则按种类匹配转换器
+        // 如果没有找到类转换器，则按种类匹配转换
         // 从SQLKIND_CONVERTERS映射中根据SqlNode的种类获取转换器
         SqlNodeConverter sqlKindConverter = SQLKIND_CONVERTERS.get(validatedSqlNode.getKind());
         if (sqlKindConverter != null) {

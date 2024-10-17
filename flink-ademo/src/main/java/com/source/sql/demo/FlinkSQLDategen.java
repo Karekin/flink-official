@@ -10,8 +10,10 @@ public class FlinkSQLDategen {
         env.setParallelism(1);
         // 创建 TableEnvironment
         final StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
+        String db = "create database xm COMMENT '这里是注释信息'";
+        tableEnv.executeSql(db);
         String ddl = "CREATE TABLE t_user (\n"
-                + "  id INT,\n"
+                + "  id INT PRIMARY KEY NOT ENFORCED,\n"
                 + "  name STRING,\n"
                 + "  age INT,\n"
                 + "  created_at DATE,\n"

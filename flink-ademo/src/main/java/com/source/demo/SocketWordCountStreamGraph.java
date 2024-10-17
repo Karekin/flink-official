@@ -14,6 +14,7 @@ import org.apache.flink.util.Collector;
  * @授课老师: 码界探索
  * @微信: 252810631
  * @版权所有: 请尊重劳动成果
+ * 用 CliFrontend 提交任务前，需要通过 nc -lk 9999 启动 socket 端口
  *
  */
 

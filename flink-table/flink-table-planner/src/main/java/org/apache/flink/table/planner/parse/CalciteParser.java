@@ -88,7 +88,7 @@ public class CalciteParser {
             /**
              * 调用 SqlParser 的 parseStmtList 方法来解析 SQL 语句列表
              * 1，javaCC 使用自顶向下（top-down）递归下降（recursive descent)解析。
-             *  2，默认是LL(1)文法用于预测性解析。
+             * 2，默认是LL(1)文法用于预测性解析。
              */
             return parser.parseStmtList();
         } catch (SqlParseException e) {
