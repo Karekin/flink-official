@@ -105,6 +105,7 @@ under the License.
 		<module>flink-ademo</module>
 		<module>flink-aasql</module>
 		<module>flink-lineage-demo</module>
+		<module>calcite-sql-engine</module>
 	</modules>
 
 	<properties>
