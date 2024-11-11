@@ -1943,7 +1943,7 @@ public abstract class Dispatcher extends FencedRpcEndpoint<DispatcherId>
                         (ignored) -> {
                             jobManagerRunnerTerminationFutures.remove(jobId);
                             /**
-                             * 出发this::persistAndRunJob执行
+                             * 触发this::persistAndRunJob执行
                              */
                             action.accept(jobGraph);
                         }));

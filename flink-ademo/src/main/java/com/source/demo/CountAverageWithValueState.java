@@ -15,7 +15,7 @@ public class CountAverageWithValueState extends RichFlatMapFunction<Tuple2<Strin
     @Override
     public void open(Configuration parameters) throws Exception {
         super.open(parameters);
-        ValueStateDescriptor descriptor = new ValueStateDescriptor<Tuple2<String, Long>>(
+        ValueStateDescriptor<Tuple2<String, Long>> descriptor = new ValueStateDescriptor<Tuple2<String, Long>>(
                 "valueDescriptor",
                 Types.TUPLE(Types.STRING, Types.LONG));
         countAndSum = getRuntimeContext().getState(descriptor);

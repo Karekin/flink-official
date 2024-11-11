@@ -89,7 +89,7 @@ public class JobMasterConfiguration {
          */
         final String tmpDirectory = ConfigurationUtils.parseTempDirectories(configuration)[0];
         /**
-         * 注册重拾相关的配置
+         * 注册重试相关的配置
          */
         final RetryingRegistrationConfiguration retryingRegistrationConfiguration =
                 RetryingRegistrationConfiguration.fromConfiguration(configuration);

@@ -72,7 +72,7 @@ public class SocketWordCountStreamGraph {
         public void flatMap(String element, Collector<Tuple2<String, Integer>> collector) throws Exception {
             String [] eles = element.split(" ");
             for(String chr : eles){
-                //Thread.sleep(10000);//睡眠十秒
+//                Thread.sleep(10000);//睡眠十秒
                 collector.collect(new Tuple2<>(chr,1));
             }
         }
