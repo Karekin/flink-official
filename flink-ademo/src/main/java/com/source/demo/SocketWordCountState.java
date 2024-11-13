@@ -24,7 +24,7 @@ public class SocketWordCountState {
         Configuration config = new Configuration();
         config.set(StateBackendOptions.STATE_BACKEND, "hashmap");
         config.set(CheckpointingOptions.CHECKPOINT_STORAGE, "filesystem");
-        config.set(CheckpointingOptions.CHECKPOINTS_DIRECTORY, "file:///H:/chk");
+        config.set(CheckpointingOptions.CHECKPOINTS_DIRECTORY, "file:///Volumes/karekinSSD1/resource/FlinkSourceCode/FlinkCore");
 
         /**
          * 创建StreamExecutionEnvironment
