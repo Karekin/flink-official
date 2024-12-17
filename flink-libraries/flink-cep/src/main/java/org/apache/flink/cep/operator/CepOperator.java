@@ -486,6 +486,13 @@ public class CepOperator<IN, KEY, OUT>
      * @param timestamp The timestamp of the event
      */
     private void processEvent(NFAState nfaState, IN event, long timestamp) throws Exception {
+
+        // 当数据触发新逻辑注入时，调用用户方法注入新逻辑
+        if (needChange(event)) {
+            changeNFA(event);
+            return;
+        }
+
         try (SharedBufferAccessor<IN> sharedBufferAccessor = partialMatches.getAccessor()) {
             Collection<Map<String, List<IN>>> patterns =
                     nfa.process(

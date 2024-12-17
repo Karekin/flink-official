@@ -75,16 +75,18 @@ public class CEPTest {
                                 })
                         .within(Time.minutes(5));
 
-        PatternStream patternStream = CEP.pattern(source, initPattern);
+        PatternStream<Tuple3<String, Long, String>> patternStream = CEP.pattern(source, initPattern);
 
-        PatternStream patternstream =
+        PatternStream<Tuple3<String, Long, String>> patternstream =
                 patternStream
                         //	Pattern 更新逻辑
                         .registerListener(
                         new CepListener<Tuple3<String, Long, String>>() {
                             @Override
                             public Boolean needChange(Tuple3<String, Long, String> element) {
-                                return element.f0.equals("change");
+                                boolean result = element.f0.equals("change");
+                                System.out.println("检测到事件：" + element + ", 是否需要更新模式：" + result);
+                                return result;
                             }
 
                             @Override

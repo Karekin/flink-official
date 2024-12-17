@@ -52,6 +52,7 @@ import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.PriorityQueue;
 import java.util.Queue;
 import java.util.Stack;
@@ -110,6 +111,21 @@ public class NFA<T> {
      * ({@code true}), or silently discarded ({@code false}).
      */
     private final boolean handleTimeout;
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        NFA<?> nfa = (NFA<?>) o;
+        return windowTime == nfa.windowTime
+                && handleTimeout == nfa.handleTimeout
+                && Objects.equals(states, nfa.states);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(states, windowTime, handleTimeout);
+    }
 
     public NFA(
             final Collection<State<T>> validStates,
