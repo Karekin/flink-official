@@ -41,32 +41,47 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
 import static org.apache.flink.util.Preconditions.checkState;
 
 /**
- * A {@link ResultPartition} which writes buffers directly to {@link ResultSubpartition}s. This is
- * in contrast to implementations where records are written to a joint structure, from which the
- * subpartitions draw the data after the write phase is finished, for example the sort-based
- * partitioning.
+ * 一个 {@link ResultPartition} 的实现类，直接将缓冲区数据写入到对应的 {@link ResultSubpartition}。
+ * 这与基于联合结构的实现（例如基于排序的分区）不同，后者是在写入阶段完成后，
+ * 子分区从联合结构中提取数据。
  *
- * <p>To avoid confusion: On the read side, all subpartitions return buffers (and backlog) to be
- * transported through the network.
+ * <p>注意：在读取阶段，所有子分区都会返回缓冲区及其积压数据（backlog），
+ * 用于通过网络传输。
  */
 public abstract class BufferWritingResultPartition extends ResultPartition {
 
-    /** The subpartitions of this partition. At least one. */
+    /** 当前分区中的子分区数组。至少包含一个子分区。 */
     protected final ResultSubpartition[] subpartitions;
 
     /**
-     * For non-broadcast mode, each subpartition maintains a separate BufferBuilder which might be
-     * null.
+     * 在非广播模式下，每个子分区会维护一个独立的 BufferBuilder。
+     * 当没有分配缓冲区时，该字段可能为 null。
      */
     private final BufferBuilder[] unicastBufferBuilders;
 
-    /** For broadcast mode, a single BufferBuilder is shared by all subpartitions. */
+    /** 在广播模式下，所有子分区共享一个 BufferBuilder。 */
     private BufferBuilder broadcastBufferBuilder;
 
+    /** 用于记录硬性背压时间（每秒的毫秒数）。 */
     private TimerGauge hardBackPressuredTimeMsPerSecond = new TimerGauge();
-    //总长度
+
+    /** 总写入字节数。 */
     private long totalWrittenBytes;
 
+
+    /**
+     * 构造函数，初始化 BufferWritingResultPartition。
+     *
+     * @param owningTaskName     拥有此分区的任务名称。
+     * @param partitionIndex     分区的索引号。
+     * @param partitionId        分区的唯一标识符。
+     * @param partitionType      分区类型（例如 BLOCKING、PIPELINED 等）。
+     * @param subpartitions      分区的子分区数组。
+     * @param numTargetKeyGroups 目标 key 组数量。
+     * @param partitionManager   分区管理器，用于管理此分区。
+     * @param bufferCompressor   可选的缓冲区压缩器，用于压缩数据。
+     * @param bufferPoolFactory  提供缓冲池的工厂方法，支持抛出 IO 异常。
+     */
     public BufferWritingResultPartition(
             String owningTaskName,
             int partitionIndex,
@@ -78,33 +93,49 @@ public abstract class BufferWritingResultPartition extends ResultPartition {
             @Nullable BufferCompressor bufferCompressor,
             SupplierWithException<BufferPool, IOException> bufferPoolFactory) {
 
+        // 调用父类的构造函数进行初始化。
         super(
                 owningTaskName,
                 partitionIndex,
                 partitionId,
                 partitionType,
-                subpartitions.length,
+                subpartitions.length, // 子分区的数量
                 numTargetKeyGroups,
                 partitionManager,
                 bufferCompressor,
                 bufferPoolFactory);
 
+        // 检查子分区数组是否为空，并将其赋值给当前实例的字段。
         this.subpartitions = checkNotNull(subpartitions);
+
+        // 初始化单播模式下的 BufferBuilder 数组，数组大小等于子分区的数量。
         this.unicastBufferBuilders = new BufferBuilder[subpartitions.length];
     }
 
+
+    /**
+     * 内部设置方法，用于检查和初始化缓冲池。
+     * @throws IOException 如果缓冲池的配置不正确（例如缓冲区不足）。
+     */
     @Override
     protected void setupInternal() throws IOException {
+        // 检查缓冲池中是否有足够的保证缓冲区数量，至少要与子分区数量相等。
         checkState(
                 bufferPool.getNumberOfRequiredMemorySegments() >= getNumberOfSubpartitions(),
-                "Bug in result partition setup logic: Buffer pool has not enough guaranteed buffers for"
-                        + " this result partition.");
+                "ResultPartition 设置逻辑中存在错误：缓冲池的保证缓冲区数量不足，"
+                        + "无法支持当前分区。");
     }
 
+
+    /**
+     * 获取所有子分区中队列中缓冲区的总数。
+     * @return 总的缓冲区数量。
+     */
     @Override
     public int getNumberOfQueuedBuffers() {
         int totalBuffers = 0;
 
+        // 遍历每个子分区，累计其未同步队列中的缓冲区数量。
         for (ResultSubpartition subpartition : subpartitions) {
             totalBuffers += subpartition.unsynchronizedGetNumberOfQueuedBuffers();
         }
@@ -112,22 +143,40 @@ public abstract class BufferWritingResultPartition extends ResultPartition {
         return totalBuffers;
     }
 
+
+    /**
+     * 获取所有子分区队列中缓冲区的总大小（以字节为单位），
+     * 仅计算未使用的部分。
+     *
+     * @return 未使用的缓冲区字节大小。
+     */
     @Override
     public long getSizeOfQueuedBuffersUnsafe() {
         long totalNumberOfBytes = 0;
 
+        // 遍历所有子分区，计算其缓冲区的字节数。
         for (ResultSubpartition subpartition : subpartitions) {
             totalNumberOfBytes += Math.max(0, subpartition.getTotalNumberOfBytesUnsafe());
         }
 
+        // 用已写入的总字节数减去所有子分区的已使用字节数，得到未使用字节数。
         return totalWrittenBytes - totalNumberOfBytes;
     }
 
+
+    /**
+     * 获取指定子分区队列中的缓冲区数量。
+     * @param targetSubpartition 目标子分区的索引。
+     * @return 子分区中的缓冲区数量。
+     */
     @Override
     public int getNumberOfQueuedBuffers(int targetSubpartition) {
+        // 确保子分区索引在合法范围内。
         checkArgument(targetSubpartition >= 0 && targetSubpartition < numSubpartitions);
+        // 返回指定子分区未同步队列中的缓冲区数量。
         return subpartitions[targetSubpartition].unsynchronizedGetNumberOfQueuedBuffers();
     }
+
 
     protected void flushSubpartition(int targetSubpartition, boolean finishProducers) {
         if (finishProducers) {
