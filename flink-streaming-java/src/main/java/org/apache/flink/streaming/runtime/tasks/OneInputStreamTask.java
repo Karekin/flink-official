@@ -65,39 +65,48 @@ import static org.apache.flink.util.Preconditions.checkState;
 @Internal
 public class OneInputStreamTask<IN, OUT> extends StreamTask<OUT, OneInputStreamOperator<IN, OUT>> {
 
+    /**
+     * 可能为空的 {@link CheckpointBarrierHandler} 实例，用于处理检查点屏障。
+     */
     @Nullable private CheckpointBarrierHandler checkpointBarrierHandler;
 
+    /**
+     * 用于跟踪输入水印的 {@link WatermarkGauge} 实例。
+     */
     private final WatermarkGauge inputWatermarkGauge = new WatermarkGauge();
 
     /**
-     * Constructor for initialization, possibly with initial state (recovery / savepoint / etc).
+     * 初始化构造函数，可以使用初始状态（如恢复或保存点等）。
      *
-     * @param env The task environment for this task.
+     * @param env 任务的运行环境。
+     * @throws Exception 如果初始化过程中发生错误。
      */
     public OneInputStreamTask(Environment env) throws Exception {
         super(env);
     }
 
     /**
-     * Constructor for initialization, possibly with initial state (recovery / savepoint / etc).
+     * 初始化构造函数，可以使用初始状态（如恢复或保存点等）。
      *
-     * <p>This constructor accepts a special {@link TimerService}. By default (and if null is passes
-     * for the time provider) a {@link SystemProcessingTimeService DefaultTimerService} will be
-     * used.
+     * <p>此构造函数接受一个特殊的 {@link TimerService} 实例。默认情况下（如果传递了 null 作为时间提供者），
+     * 将使用 {@link SystemProcessingTimeService DefaultTimerService}。
      *
-     * @param env The task environment for this task.
-     * @param timeProvider Optionally, a specific time provider to use.
+     * @param env 任务的运行环境。
+     * @param timeProvider 可选的时间提供者实例。
+     * @throws Exception 如果初始化过程中发生错误。
      */
     @VisibleForTesting
     public OneInputStreamTask(Environment env, @Nullable TimerService timeProvider)
             throws Exception {
         super(env, timeProvider);
     }
+
     /**
      * @授课老师(微信): yi_locus
      * email: 156184212@qq.com
-     * 初始化DataOutput、StreamTaskInput、StreamInputProcessor
-    */
+     * 初始化 DataOutput、StreamTaskInput 和 StreamInputProcessor。
+     */
+
     @Override
     public void init() throws Exception {
         // 获取流配置

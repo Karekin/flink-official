@@ -35,124 +35,153 @@ import java.nio.ByteBuffer;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * A record-oriented runtime result writer API for producing results.
+ * 面向记录的运行时结果写入接口，用于生成结果。
  *
- * <p>If {@link ResultPartitionWriter#close()} is called before {@link
- * ResultPartitionWriter#fail(Throwable)} or {@link ResultPartitionWriter#finish()}, it abruptly
- * triggers failure and cancellation of production. In this case {@link
- * ResultPartitionWriter#fail(Throwable)} still needs to be called afterwards to fully release all
- * resources associated the partition and propagate failure cause to the consumer if possible.
+ * <p>如果在调用 {@link ResultPartitionWriter#fail(Throwable)} 或 {@link ResultPartitionWriter#finish()} 之前调用了 {@link ResultPartitionWriter#close()}，
+ * 则会突然触发生产的失败和取消。在这种情况下，仍需要调用 {@link ResultPartitionWriter#fail(Throwable)}，以便完全释放与分区相关的所有资源，
+ * 并在可能的情况下将失败原因传播给消费者。
  */
-/**
- * @授课老师(微信): yi_locus
- * email: 156184212@qq.com
- * Task运行时用来存储结果的接口
-*/
 public interface ResultPartitionWriter extends AutoCloseable, AvailabilityProvider {
 
-    /** Setup partition, potentially heavy-weight, blocking operation comparing to just creation. */
+    /**
+     * 设置分区，这通常是一个与创建相比较重的阻塞操作。
+     */
     void setup() throws IOException;
 
+    /**
+     * 获取分区的 ID。
+     */
     ResultPartitionID getPartitionId();
 
+    /**
+     * 获取子分区的数量。
+     */
     int getNumberOfSubpartitions();
 
+    /**
+     * 获取目标键组的数量。
+     */
     int getNumTargetKeyGroups();
 
-    /** Sets the max overdraft buffer size of per gate. */
+    /**
+     * 设置每个网关的最大透支缓冲区大小。
+     */
     void setMaxOverdraftBuffersPerGate(int maxOverdraftBuffersPerGate);
 
-    /** Writes the given serialized record to the target subpartition. */
     /**
-     * @授课老师(微信): yi_locus
-     * email: 156184212@qq.com
      * 将给定的序列化记录写入目标子分区。
-    */
+     * @param record 序列化记录
+     * @param targetSubpartition 目标子分区索引
+     * @throws IOException IO异常
+     */
     void emitRecord(ByteBuffer record, int targetSubpartition) throws IOException;
 
     /**
-     * Writes the given serialized record to all subpartitions. One can also achieve the same effect
-     * by emitting the same record to all subpartitions one by one, however, this method can have
-     * better performance for the underlying implementation can do some optimizations, for example
-     * coping the given serialized record only once to a shared channel which can be consumed by all
-     * subpartitions.
+     * 将给定的序列化记录写入所有子分区。
+     * <p>这种方法相比逐一写入每个子分区可以有更好的性能，因为底层实现可以进行优化，
+     * 比如只需要将序列化记录复制一次到一个共享通道，所有子分区都可以消费。
+     * @param record 序列化记录
+     * @throws IOException IO异常
      */
     void broadcastRecord(ByteBuffer record) throws IOException;
 
-    /** Writes the given {@link AbstractEvent} to all subpartitions. */
+    /**
+     * 将给定的 {@link AbstractEvent} 广播到所有子分区。
+     * @param event 要广播的事件
+     * @param isPriorityEvent 是否为优先事件
+     * @throws IOException IO异常
+     */
     void broadcastEvent(AbstractEvent event, boolean isPriorityEvent) throws IOException;
 
-    /** Timeout the aligned barrier to unaligned barrier. */
+    /**
+     * 将对齐的屏障超时转为非对齐的屏障。
+     * @param checkpointId 检查点ID
+     * @throws IOException IO异常
+     */
     void alignedBarrierTimeout(long checkpointId) throws IOException;
 
-    /** Abort the checkpoint. */
+    /**
+     * 中止检查点。
+     * @param checkpointId 检查点ID
+     * @param cause 中止原因
+     */
     void abortCheckpoint(long checkpointId, CheckpointException cause);
 
     /**
-     * Notifies the downstream tasks that this {@code ResultPartitionWriter} have emitted all the
-     * user records.
-     *
-     * @param mode tells if we should flush all records or not (it is false in case of
-     *     stop-with-savepoint (--no-drain))
+     * 通知下游任务，此 {@code ResultPartitionWriter} 已经发出了所有的用户记录。
+     * @param mode 指定是否需要刷新所有记录（例如在停止并保存点的情况下为 false）。
+     * @throws IOException IO异常
      */
     void notifyEndOfData(StopMode mode) throws IOException;
 
     /**
-     * Gets the future indicating whether all the records has been processed by the downstream
-     * tasks.
+     * 获取一个 future，用于指示所有记录是否已被下游任务处理。
      */
     CompletableFuture<Void> getAllDataProcessedFuture();
 
-    /** Sets the metric group for the {@link ResultPartitionWriter}. */
+    /**
+     * 为 {@link ResultPartitionWriter} 设置度量组。
+     * @param metrics 度量组
+     */
     void setMetricGroup(TaskIOMetricGroup metrics);
 
-    /** Returns a reader for the subpartition with the given index range. */
+    /**
+     * 为具有给定索引范围的子分区创建一个读取器。
+     * @param indexSet 子分区索引集合
+     * @param availabilityListener 可用性监听器
+     * @throws IOException IO异常
+     */
     ResultSubpartitionView createSubpartitionView(
             ResultSubpartitionIndexSet indexSet, BufferAvailabilityListener availabilityListener)
             throws IOException;
 
-    /** Manually trigger the consumption of data from all subpartitions. */
+    /**
+     * 手动触发所有子分区的数据消费。
+     */
     void flushAll();
 
-    /** Manually trigger the consumption of data from the given subpartitions. */
+    /**
+     * 手动触发指定子分区的数据消费。
+     * @param subpartitionIndex 子分区索引
+     */
     void flush(int subpartitionIndex);
 
     /**
-     * Fail the production of the partition.
-     *
-     * <p>This method propagates non-{@code null} failure causes to consumers on a best-effort
-     * basis. This call also leads to the release of all resources associated with the partition.
-     * Closing of the partition is still needed afterwards if it has not been done before.
-     *
-     * @param throwable failure cause
-     */
-    /**
-     * @授课老师(微信): yi_locus
-     * email: 156184212@qq.com
      * 使分区的生产失败。
-    */
+     * <p>此方法会尽最大努力将非 {@code null} 的失败原因传播给消费者。
+     * 同时，此调用也会释放与分区相关的所有资源。如果尚未关闭分区，仍需要之后进行关闭操作。
+     * @param throwable 失败原因
+     */
     void fail(@Nullable Throwable throwable);
 
     /**
-     * Successfully finish the production of the partition.
-     *
-     * <p>Closing of partition is still needed afterwards.
+     * 成功完成分区的生产。
+     * <p>之后仍需关闭分区。
+     * @throws IOException IO异常
      */
     void finish() throws IOException;
 
+    /**
+     * 检查分区是否已完成。
+     * @return 如果已完成则返回 true
+     */
     boolean isFinished();
 
     /**
-     * Releases the partition writer which releases the produced data and no reader can consume the
-     * partition any more.
+     * 释放分区写入器，释放生产的数据，不允许任何读取器再消费分区。
+     * @param cause 释放的原因
      */
     void release(Throwable cause);
 
+    /**
+     * 检查分区是否已释放。
+     * @return 如果已释放则返回 true
+     */
     boolean isReleased();
 
     /**
-     * Closes the partition writer which releases the allocated resource, for example the buffer
-     * pool.
+     * 关闭分区写入器，释放分配的资源，例如缓冲池。
+     * @throws Exception 异常
      */
     void close() throws Exception;
 }

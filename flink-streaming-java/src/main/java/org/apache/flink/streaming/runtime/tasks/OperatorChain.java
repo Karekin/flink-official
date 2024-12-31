@@ -95,38 +95,38 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
 import static org.apache.flink.util.Preconditions.checkState;
 
 /**
- * The {@code OperatorChain} contains all operators that are executed as one chain within a single
- * {@link StreamTask}.
+ * {@code OperatorChain} 包含所有在单个 {@link StreamTask} 中作为一个链执行的操作符。
  *
- * <p>The main entry point to the chain is it's {@code mainOperator}. {@code mainOperator} is
- * driving the execution of the {@link StreamTask}, by pulling the records from network inputs
- * and/or source inputs and pushing produced records to the remaining chained operators.
+ * <p>链的主要入口点是 {@code mainOperator}。{@code mainOperator} 负责驱动 {@link StreamTask} 的执行，
+ * 通过从网络输入和/或源输入中拉取记录，并将生成的记录推送到剩余的链式操作符。
  *
- * @param <OUT> The type of elements accepted by the chain, i.e., the input type of the chain's main
- *     operator.
+ * @param <OUT> 链接受的元素类型，即链中主操作符的输入类型。
  */
-/**
- * @授课老师(微信): yi_locus
- * email: 156184212@qq.com
- *  OperatorChain 包含在一个单独的  StreamTask 中作为链执行的所有 Operator。
-*/
+
 public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
         implements BoundedMultiInput, Closeable {
 
+    /**
+     * 日志记录器，用于记录 OperatorChain 的相关日志。
+     */
     private static final Logger LOG = LoggerFactory.getLogger(OperatorChain.class);
 
-    protected final RecordWriterOutput<?>[] streamOutputs;//用于将处理后的数据发送到网络中
+    /**
+     * 用于将处理后的数据发送到网络中的 RecordWriterOutput 数组。
+     */
+    protected final RecordWriterOutput<?>[] streamOutputs;
 
+    /**
+     * 主操作符的输出，用于管理水印的输出。
+     */
     protected final WatermarkGaugeExposingOutput<StreamRecord<OUT>> mainOperatorOutput;
 
     /**
-     * For iteration, {@link StreamIterationHead} and {@link StreamIterationTail} used for executing
-     * feedback edges do not contain any operators, in which case, {@code mainOperatorWrapper} and
-     * {@code tailOperatorWrapper} are null.
+     * 主操作符的包装器。在迭代的场景下，{@link StreamIterationHead} 和 {@link StreamIterationTail}
+     * 负责执行反馈边时不包含任何操作符，此时 {@code mainOperatorWrapper} 和 {@code tailOperatorWrapper} 为 null。
      *
-     * <p>Usually first operator in the chain is the same as {@link #mainOperatorWrapper}, but
-     * that's not the case if there are chained source inputs. In this case, one of the source
-     * inputs will be the first operator. For example the following operator chain is possible:
+     * <p>通常链中的第一个操作符与 {@link #mainOperatorWrapper} 相同，但如果存在链式的源输入则情况不同。
+     * 在这种情况下，其中一个源输入将成为第一个操作符。例如，可以存在以下操作符链：
      *
      * <pre>
      * first
@@ -136,27 +136,51 @@ public abstract class OperatorChain<OUT, OP extends StreamOperator<OUT>>
      * second
      * </pre>
      *
-     * <p>Where "first" and "second" (there can be more) are chained source operators. When it comes
-     * to things like closing, stat initialisation or state snapshotting, the operator chain is
-     * traversed: first, second, main, ..., tail or in reversed order: tail, ..., main, second,
-     * first
+     * <p>其中 "first" 和 "second"（可以有更多）是链式的源操作符。当涉及到关闭、状态初始化或状态快照时，
+     * 操作符链的遍历顺序为：first, second, main, ..., tail，或反序：tail, ..., main, second, first。
      */
     @Nullable protected final StreamOperatorWrapper<OUT, OP> mainOperatorWrapper;
 
+    /**
+     * 操作符链中的第一个操作符包装器。
+     */
     @Nullable protected final StreamOperatorWrapper<?, ?> firstOperatorWrapper;
+
+    /**
+     * 操作符链中的最后一个操作符包装器。
+     */
     @Nullable protected final StreamOperatorWrapper<?, ?> tailOperatorWrapper;
 
+    /**
+     * 链式源操作符的配置与实例映射。
+     */
     protected final Map<StreamConfig.SourceInputConfig, ChainedSource> chainedSources;
 
+    /**
+     * 操作符的总数。
+     */
     protected final int numOperators;
 
+    /**
+     * 操作符事件分发器的实现，用于处理操作符间的事件。
+     */
     protected final OperatorEventDispatcherImpl operatorEventDispatcher;
 
+    /**
+     * 用于管理资源关闭的工具。
+     */
     protected final Closer closer = Closer.create();
 
+    /**
+     * 可选的恢复完成输入。
+     */
     protected final @Nullable FinishedOnRestoreInput finishedOnRestoreInput;
 
+    /**
+     * 标志操作符链是否已关闭。
+     */
     protected boolean isClosed;
+
     /**
      * @授课老师(微信): yi_locus
      * email: 156184212@qq.com

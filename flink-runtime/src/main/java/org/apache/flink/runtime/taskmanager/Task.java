@@ -621,6 +621,11 @@ public class Task
                 || executionState == ExecutionState.FAILED;
     }
 
+    /** Starts the task's thread. */
+    public void startTaskThread() {
+        executingThread.start();
+    }
+
     /**
      * If the task has failed, this method gets the exception that caused this task to fail.
      * Otherwise this method returns null.
@@ -629,11 +634,6 @@ public class Task
      */
     public Throwable getFailureCause() {
         return failureCause;
-    }
-
-    /** Starts the task's thread. */
-    public void startTaskThread() {
-        executingThread.start();
     }
 
     /** The core work method that bootstraps the task and executes its code. */

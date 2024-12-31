@@ -61,75 +61,80 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
 import static org.apache.flink.util.Preconditions.checkState;
 
 /**
- * This is a recommended base class for all of the {@link SinkFunction} that intend to implement
- * exactly-once semantic. It does that by implementing two phase commit algorithm on top of the
- * {@link CheckpointedFunction} and {@link CheckpointListener}. User should provide custom {@code
- * TXN} (transaction handle) and implement abstract methods handling this transaction handle.
+ * 该类是所有实现 Exactly-Once 语义的 {@link SinkFunction} 的推荐基类。
+ * 它基于 {@link CheckpointedFunction} 和 {@link CheckpointListener} 实现了两阶段提交算法。
+ * 用户需要提供自定义的事务类型 {@code TXN}，并实现处理该事务的抽象方法。
  *
- * @param <IN> Input type for {@link SinkFunction}.
- * @param <TXN> Transaction to store all of the information required to handle a transaction.
- * @param <CONTEXT> Context that will be shared across all invocations for the given {@link
- *     TwoPhaseCommitSinkFunction} instance. Context is created once
+ * @param <IN>     输入数据的类型。
+ * @param <TXN>    事务句柄的类型，用于存储处理事务所需的所有信息。
+ * @param <CONTEXT> 上下文类型，在 {@link TwoPhaseCommitSinkFunction} 实例的所有调用中共享。
  */
 @PublicEvolving
 public abstract class TwoPhaseCommitSinkFunction<IN, TXN, CONTEXT> extends RichSinkFunction<IN>
         implements CheckpointedFunction, CheckpointListener {
 
+
     private static final Logger LOG = LoggerFactory.getLogger(TwoPhaseCommitSinkFunction.class);
 
+    // 用于存储挂起提交的事务映射，键为检查点 ID，值为事务的持有者对象。
     protected final LinkedHashMap<Long, TransactionHolder<TXN>> pendingCommitTransactions =
             new LinkedHashMap<>();
 
+    // 用户上下文，表示共享的事务上下文信息。
     protected transient Optional<CONTEXT> userContext;
 
+    // 存储算子状态（包括挂起事务和上下文）的 Flink 状态变量。
     protected transient ListState<State<TXN, CONTEXT>> state;
 
+    // 系统时钟，用于事务超时计算。
     private final Clock clock;
 
+    // 状态描述符，用于序列化和反序列化算子状态。
     private final ListStateDescriptor<State<TXN, CONTEXT>> stateDescriptor;
 
     /**
-     * Current Transaction Holder, including two states: 1. Normal Transaction: created when a new
-     * snapshot is taken during normal task running 2. null: After task/function is finished.
+     * 当前事务的持有者。
+     * 包括：
+     * 1. 正常事务：在任务正常运行期间的事务。
+     * 2. 空值：当任务已完成时。
      */
     @Nullable private TransactionHolder<TXN> currentTransactionHolder;
 
-    /** Specifies the maximum time a transaction should remain open. */
+    /** 指定事务保持打开的最大时间。 */
     private long transactionTimeout = Long.MAX_VALUE;
 
-    /**
-     * If true, any exception thrown in {@link #recoverAndCommit(Object)} will be caught instead of
-     * propagated.
-     */
+    /** 如果设置为 true，则在事务超时后，捕获但不传播 {@link #recoverAndCommit(Object)} 中抛出的异常。 */
     private boolean ignoreFailuresAfterTransactionTimeout;
 
-    /**
-     * If a transaction's elapsed time reaches this percentage of the transactionTimeout, a warning
-     * message will be logged. Value must be in range [0,1]. Negative value disables warnings.
-     */
+    /** 当事务的耗时达到 transactionTimeout 的指定百分比时，记录警告日志。取值范围为 [0,1]，负值禁用警告。 */
     private double transactionTimeoutWarningRatio = -1;
 
-    /** Whether this sink function as well as its task is finished. */
+    /** 标记当前 SinkFunction 以及其任务是否完成。 */
     private boolean finished = false;
 
+
     /**
-     * Use default {@link ListStateDescriptor} for internal state serialization. Helpful utilities
-     * for using this constructor are {@link TypeInformation#of(Class)}, {@link
-     * org.apache.flink.api.common.typeinfo.TypeHint} and {@link TypeInformation#of(TypeHint)}.
-     * Example:
+     * 使用默认的 {@link ListStateDescriptor} 构造函数。
+     * 用户可以通过 {@link TypeInformation} 或 {@link TypeHint} 提供事务和上下文的序列化器。
      *
-     * <pre>{@code
+     * 示例：
      * TwoPhaseCommitSinkFunction(TypeInformation.of(new TypeHint<State<TXN, CONTEXT>>() {}));
-     * }</pre>
      *
-     * @param transactionSerializer {@link TypeSerializer} for the transaction type of this sink
-     * @param contextSerializer {@link TypeSerializer} for the context type of this sink
+     * @param transactionSerializer 事务类型的序列化器。
+     * @param contextSerializer     上下文类型的序列化器。
      */
     public TwoPhaseCommitSinkFunction(
             TypeSerializer<TXN> transactionSerializer, TypeSerializer<CONTEXT> contextSerializer) {
         this(transactionSerializer, contextSerializer, Clock.systemUTC());
     }
 
+    /**
+     * 带有自定义时钟的构造函数。
+     *
+     * @param transactionSerializer 事务类型的序列化器。
+     * @param contextSerializer     上下文类型的序列化器。
+     * @param clock                 自定义时钟（通常用于测试）。
+     */
     @VisibleForTesting
     TwoPhaseCommitSinkFunction(
             TypeSerializer<TXN> transactionSerializer,
@@ -141,24 +146,59 @@ public abstract class TwoPhaseCommitSinkFunction<IN, TXN, CONTEXT> extends RichS
         this.clock = clock;
     }
 
+
+    /**
+     * 初始化用户上下文的方法。
+     *
+     * 用户可以通过重写此方法为每个实例化的 SinkFunction 初始化上下文。
+     * 默认实现返回一个空的 {@link Optional}，即无上下文。
+     *
+     * @return 一个 {@link Optional<CONTEXT>} 对象，表示初始化的用户上下文（如果存在）。
+     */
     protected Optional<CONTEXT> initializeUserContext() {
         return Optional.empty();
     }
 
+    /**
+     * 获取当前的用户上下文。
+     *
+     * 用户上下文通常是跨事务共享的信息。此方法返回当前存储的用户上下文。
+     * 如果用户上下文未被初始化或不存在，将返回 {@link Optional#empty()}。
+     *
+     * @return 当前用户上下文（可能为空）。
+     */
     protected Optional<CONTEXT> getUserContext() {
         return userContext;
     }
 
+    /**
+     * 获取当前的事务句柄。
+     *
+     * 当前事务句柄是指当前事务的唯一标识符或操作句柄。
+     * 如果当前事务持有者为 null，则表示没有正在进行的事务，返回 null。
+     *
+     * @return 当前事务句柄，如果没有活动事务则返回 null。
+     */
     @Nullable
     protected TXN currentTransaction() {
         return currentTransactionHolder == null ? null : currentTransactionHolder.handle;
     }
 
+    /**
+     * 获取所有挂起的事务的流式视图。
+     *
+     * 挂起的事务是指那些已被触发但尚未提交的事务。
+     * 此方法将挂起的事务（按检查点 ID 分组）转换为一个流（Stream），
+     * 每个元素是检查点 ID 和对应事务句柄的键值对。
+     *
+     * @return 包含挂起事务的 {@link Stream}，每个元素是检查点 ID 和事务句柄的键值对。
+     */
     @Nonnull
     protected Stream<Map.Entry<Long, TXN>> pendingTransactions() {
         return pendingCommitTransactions.entrySet().stream()
                 .map(e -> new AbstractMap.SimpleEntry<>(e.getKey(), e.getValue().handle));
     }
+
 
     // ------ methods that should be implemented in child class to support two phase commit
     // algorithm ------
@@ -167,198 +207,284 @@ public abstract class TwoPhaseCommitSinkFunction<IN, TXN, CONTEXT> extends RichS
     protected abstract void invoke(TXN transaction, IN value, Context context) throws Exception;
 
     /**
-     * Method that starts a new transaction.
+     * 开启一个新的事务。
      *
-     * @return newly created transaction.
+     * 用户需要实现此方法以创建并初始化一个事务。该方法在每次新的检查点触发时调用。
+     *
+     * @return 创建的新事务。
+     * @throws Exception 如果事务创建失败，抛出异常。
      */
     protected abstract TXN beginTransaction() throws Exception;
 
     /**
-     * Pre commit previously created transaction. Pre commit must make all of the necessary steps to
-     * prepare the transaction for a commit that might happen in the future. After this point the
-     * transaction might still be aborted, but underlying implementation must ensure that commit
-     * calls on already pre committed transactions will always succeed.
+     * 预提交事务。
      *
-     * <p>Usually implementation involves flushing the data.
+     * 该方法的实现需要确保事务在未来可以被安全地提交。通常在此步骤中，用户会将缓冲的数据刷新到磁盘。
+     * 注意：事务在预提交之后，仍可能被中止。
+     *
+     * @param transaction 待预提交的事务。
+     * @throws Exception 如果预提交失败，抛出异常。
      */
     protected abstract void preCommit(TXN transaction) throws Exception;
 
     /**
-     * Commit a pre-committed transaction. If this method fail, Flink application will be restarted
-     * and {@link TwoPhaseCommitSinkFunction#recoverAndCommit(Object)} will be called again for the
-     * same transaction.
+     * 提交已预提交的事务。
+     *
+     * 如果该方法失败，Flink 会重启应用程序，并再次调用 {@link #recoverAndCommit(Object)} 来重试提交。
+     * 提交后，事务被视为完成且不可再修改。
+     *
+     * @param transaction 待提交的事务。
      */
     protected abstract void commit(TXN transaction);
 
+
     /**
-     * Invoked on recovered transactions after a failure. User implementation must ensure that this
-     * call will eventually succeed. If it fails, Flink application will be restarted and it will be
-     * invoked again. If it does not succeed eventually, a data loss will occur. Transactions will
-     * be recovered in an order in which they were created.
+     * 在故障恢复时调用以提交已预提交的事务。
+     *
+     * 该方法需要确保最终能够成功。如果该方法持续失败，Flink 会不断重试。
+     * 如果无法最终成功，将会导致数据丢失。
+     *
+     * @param transaction 需要恢复并提交的事务。
      */
     protected void recoverAndCommit(TXN transaction) {
         commit(transaction);
     }
 
-    /** Abort a transaction. */
+    /**
+     * 中止事务。
+     *
+     * 如果事务在提交前出现异常或任务失败，需要调用该方法中止事务，确保未提交的数据不会生效。
+     *
+     * @param transaction 待中止的事务。
+     */
     protected abstract void abort(TXN transaction);
 
-    /** Abort a transaction that was rejected by a coordinator after a failure. */
+    /**
+     * 在故障恢复时调用以中止事务。
+     *
+     * 如果事务在故障时未成功提交，需要调用该方法中止事务。
+     *
+     * @param transaction 需要恢复并中止的事务。
+     */
     protected void recoverAndAbort(TXN transaction) {
         abort(transaction);
     }
 
     /**
-     * Callback for subclasses which is called after restoring (each) user context.
+     * 子类的回调方法，用于在恢复每个用户上下文后调用。
      *
-     * @param handledTransactions transactions which were already committed or aborted and do not
-     *     need further handling
+     * 当任务从故障中恢复时，会恢复挂起事务和用户上下文。此方法允许子类在恢复用户上下文后执行额外的操作。
+     *
+     * @param handledTransactions 已经提交或中止的事务集合，这些事务不需要进一步处理。
      */
     protected void finishRecoveringContext(Collection<TXN> handledTransactions) {}
 
     /**
-     * This method is called at the end of data processing.
+     * 在数据处理结束时调用的方法。
      *
-     * <p>The method is expected to flush all remaining buffered data. Exceptions will cause the
-     * pipeline to be recognized as failed, because the last data items are not processed properly.
-     * You may use this method to flush remaining buffered elements in the state into the current
-     * transaction which will be committed in the last checkpoint.
+     * <p>该方法的主要作用是刷新所有剩余的缓冲数据。如果该方法抛出异常，整个管道会被认为失败，
+     * 因为最后的数据未被正确处理。通常在此方法中，将缓冲的元素写入当前事务，并在最后一个检查点中提交。
+     *
+     * @param transaction 当前事务的句柄，可以为 null。
      */
     protected void finishProcessing(@Nullable TXN transaction) {}
 
-    // ------ entry points for above methods implementing {@CheckPointedFunction} and
-    // {@CheckpointListener} ------
+// ------ 以上方法是 CheckPointedFunction 和 CheckpointListener 接口的入口方法 ------
 
-    /** This should not be implemented by subclasses. */
+    /**
+     * 不应由子类实现的最终方法。
+     *
+     * <p>该方法是 Flink 的 `RichSinkFunction` 中的 `invoke` 方法的重载版本。
+     * 它被标记为 `final`，以确保子类不会覆盖它。实际的数据处理逻辑应该放在另一个 `invoke` 方法中。
+     *
+     * @param value 输入的数据。
+     * @throws Exception 如果数据处理失败，抛出异常。
+     */
     @Override
     public final void invoke(IN value) throws Exception {}
 
+    /**
+     * 数据处理的主要入口方法。
+     *
+     * <p>在数据流的每个元素到达时，该方法会被调用。
+     * 它会检查当前事务是否存在，如果存在，则调用带有事务句柄的 `invoke` 方法进行处理。
+     * 如果当前事务为 null，则抛出异常，因为没有活动事务的情况下不应进行数据处理。
+     *
+     * @param value   输入的数据。
+     * @param context 上下文信息，包含时间戳、事件时间等元信息。
+     * @throws Exception 如果数据处理失败，抛出异常。
+     */
     @Override
     public final void invoke(IN value, Context context) throws Exception {
+        // 获取当前的事务句柄
         TXN currentTransaction = currentTransaction();
+        // 检查事务是否存在，如果不存在则抛出异常
         checkNotNull(
                 currentTransaction,
-                "Two phase commit sink function with null transaction should not be invoked! ");
+                "两阶段提交 SinkFunction 的事务为空时不应被调用！");
+        // 调用子类实现的事务处理逻辑
         invoke(currentTransaction, value, context);
     }
 
+
+    /**
+     * 在任务完成时调用的方法。
+     *
+     * <p>当数据流处理完成后，Flink 会调用此方法通知 SinkFunction 完成任务。
+     * 该方法会标记当前任务为已完成（`finished = true`），并通过调用 `finishProcessing` 来处理
+     * 当前未处理的事务。如果处理失败，将抛出异常。
+     *
+     * @throws Exception 如果任务完成时发生错误。
+     */
     @Override
     public final void finish() throws Exception {
+        // 标记任务已完成
         finished = true;
+        // 完成处理当前事务（例如清理缓冲区数据）
         finishProcessing(currentTransaction());
     }
 
+    /**
+     * 在检查点完成时调用的方法。
+     *
+     * <p>该方法是 Flink 的回调方法，用于通知 SinkFunction 某个检查点已经成功完成，
+     * 表示所有的状态数据和挂起事务都被安全地持久化了。此时可以安全地提交与该检查点相关的事务。
+     *
+     * 处理逻辑包含以下几种场景：
+     * 1. 当前检查点完成，只有一个挂起的事务需要提交，这是最常见的情况。
+     * 2. 存在多个挂起的事务需要提交（例如，前一个检查点失败，当前检查点覆盖了之前的状态）。
+     * 3. 检查点完成通知可能不是最新的（例如，由于延迟或重叠检查点的影响）。
+     *
+     * <p>确保无论何种情况，都不会丢失挂起的事务。
+     *
+     * @param checkpointId 已完成的检查点 ID。
+     * @throws Exception 如果提交事务时发生错误。
+     */
     @Override
     public final void notifyCheckpointComplete(long checkpointId) throws Exception {
-        // the following scenarios are possible here
-        //
-        //  (1) there is exactly one transaction from the latest checkpoint that
-        //      was triggered and completed. That should be the common case.
-        //      Simply commit that transaction in that case.
-        //
-        //  (2) there are multiple pending transactions because one previous
-        //      checkpoint was skipped. That is a rare case, but can happen
-        //      for example when:
-        //
-        //        - the master cannot persist the metadata of the last
-        //          checkpoint (temporary outage in the storage system) but
-        //          could persist a successive checkpoint (the one notified here)
-        //
-        //        - other tasks could not persist their status during
-        //          the previous checkpoint, but did not trigger a failure because they
-        //          could hold onto their state and could successfully persist it in
-        //          a successive checkpoint (the one notified here)
-        //
-        //      In both cases, the prior checkpoint never reach a committed state, but
-        //      this checkpoint is always expected to subsume the prior one and cover all
-        //      changes since the last successful one. As a consequence, we need to commit
-        //      all pending transactions.
-        //
-        //  (3) Multiple transactions are pending, but the checkpoint complete notification
-        //      relates not to the latest. That is possible, because notification messages
-        //      can be delayed (in an extreme case till arrive after a succeeding checkpoint
-        //      was triggered) and because there can be concurrent overlapping checkpoints
-        //      (a new one is started before the previous fully finished).
-        //
-        // ==> There should never be a case where we have no pending transaction here
-        //
-
+        // 遍历挂起的事务映射表
         Iterator<Map.Entry<Long, TransactionHolder<TXN>>> pendingTransactionIterator =
                 pendingCommitTransactions.entrySet().iterator();
+
+        // 用于捕获第一个提交失败的异常
         Throwable firstError = null;
 
+        // 遍历挂起的事务，并提交与当前检查点 ID 或更早相关的事务
         while (pendingTransactionIterator.hasNext()) {
             Map.Entry<Long, TransactionHolder<TXN>> entry = pendingTransactionIterator.next();
-            Long pendingTransactionCheckpointId = entry.getKey();
-            TransactionHolder<TXN> pendingTransaction = entry.getValue();
+            Long pendingTransactionCheckpointId = entry.getKey(); // 挂起事务对应的检查点 ID
+            TransactionHolder<TXN> pendingTransaction = entry.getValue(); // 挂起的事务
+
+            // 如果挂起事务的检查点 ID 大于当前检查点 ID，则跳过
             if (pendingTransactionCheckpointId > checkpointId) {
                 continue;
             }
 
+            // 日志记录，通知开始提交事务
             LOG.info(
-                    "{} - checkpoint {} complete, committing transaction {} from checkpoint {}",
+                    "{} - 检查点 {} 完成，提交事务 {}（来自检查点 {}）",
                     name(),
                     checkpointId,
                     pendingTransaction,
                     pendingTransactionCheckpointId);
 
+            // 如果事务接近超时时间，记录警告日志
             logWarningIfTimeoutAlmostReached(pendingTransaction);
+
             try {
+                // 提交事务
                 commit(pendingTransaction.handle);
             } catch (Throwable t) {
+                // 捕获提交失败的第一个异常
                 if (firstError == null) {
                     firstError = t;
                 }
             }
 
-            LOG.debug("{} - committed checkpoint transaction {}", name(), pendingTransaction);
+            // 提交成功后，记录调试日志
+            LOG.debug("{} - 已提交事务（来自检查点 {}）", name(), pendingTransaction);
 
+            // 提交成功后，从挂起事务列表中移除
             pendingTransactionIterator.remove();
         }
 
+        // 如果存在提交失败的异常，抛出并记录
         if (firstError != null) {
             throw new FlinkRuntimeException(
-                    "Committing one of transactions failed, logging first encountered failure",
-                    firstError);
+                    "提交事务时发生错误，记录第一个遇到的错误", firstError);
         }
     }
 
-    @Override
-    public void notifyCheckpointAborted(long checkpointId) {}
 
+    /**
+     * 在检查点被中止时调用。
+     *
+     * <p>该方法是 Flink 的回调方法，用于通知 SinkFunction 某个检查点未成功完成（被中止）。
+     * 默认实现为空，因为两阶段提交的事务模型通常不需要特殊处理中止的检查点。
+     * 如果需要处理中止的检查点，可以在子类中覆盖此方法。
+     *
+     * @param checkpointId 被中止的检查点 ID。
+     */
+    @Override
+    public void notifyCheckpointAborted(long checkpointId) {
+        // 默认实现为空，可根据需求在子类中覆盖
+    }
+
+    /**
+     * 在触发检查点时调用，用于保存当前状态。
+     *
+     * <p>该方法是 Flink 的 `CheckpointedFunction` 接口的实现。
+     * 每当检查点触发时，Flink 会调用此方法以保存当前的算子状态和事务信息。
+     * 这相当于两阶段提交中的“预提交”阶段：
+     * - 将当前事务标记为挂起，保存到 `pendingCommitTransactions` 中。
+     * - 更新状态存储以包含当前事务及其上下文。
+     * - 如果任务未完成，开启一个新的事务。
+     *
+     * @param context 检查点上下文，包含检查点 ID 和其他元信息。
+     * @throws Exception 如果保存状态或预提交事务失败，则抛出异常。
+     */
     @Override
     public void snapshotState(FunctionSnapshotContext context) throws Exception {
-        // this is like the pre-commit of a 2-phase-commit transaction
-        // we are ready to commit and remember the transaction
-
+        // 获取当前检查点的 ID
         long checkpointId = context.getCheckpointId();
+
+        // 记录日志，通知检查点触发并准备刷新事务
         LOG.debug(
-                "{} - checkpoint {} triggered, flushing transaction '{}'",
+                "{} - 检查点 {} 触发，刷新当前事务 '{}'",
                 name(),
-                context.getCheckpointId(),
+                checkpointId,
                 currentTransactionHolder);
 
+        // 如果当前存在事务，则执行预提交
         if (currentTransactionHolder != null) {
+            // 预提交事务，将缓冲数据刷入持久存储（例如磁盘）
             preCommit(currentTransactionHolder.handle);
+            // 将当前事务存储到挂起事务列表中，等待检查点完成后提交
             pendingCommitTransactions.put(checkpointId, currentTransactionHolder);
-            LOG.debug("{} - stored pending transactions {}", name(), pendingCommitTransactions);
+            LOG.debug("{} - 存储挂起事务 {}", name(), pendingCommitTransactions);
         }
 
-        // no need to start new transactions after sink function is closed (no more input data)
+        // 如果任务未完成，则开始一个新的事务
         if (!finished) {
             currentTransactionHolder = beginTransactionInternal();
         } else {
+            // 如果任务已完成，则不再开启新事务
             currentTransactionHolder = null;
         }
-        LOG.debug("{} - started new transaction '{}'", name(), currentTransactionHolder);
 
+        // 记录日志，通知新的事务已开始
+        LOG.debug("{} - 开启新事务 '{}'", name(), currentTransactionHolder);
+
+        // 更新状态存储
+        // 状态包含当前事务、所有挂起事务以及用户上下文
         state.update(
                 Collections.singletonList(
                         new State<>(
-                                this.currentTransactionHolder,
-                                new ArrayList<>(pendingCommitTransactions.values()),
-                                userContext)));
+                                this.currentTransactionHolder, // 当前事务
+                                new ArrayList<>(pendingCommitTransactions.values()), // 挂起事务列表
+                                userContext))); // 用户上下文
     }
+
 
     @Override
     public void initializeState(FunctionInitializationContext context) throws Exception {
