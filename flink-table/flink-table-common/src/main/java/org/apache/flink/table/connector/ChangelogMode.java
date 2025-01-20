@@ -28,70 +28,84 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * The set of changes contained in a changelog.
+ * 代表变更日志中的变更集合。
  *
- * @see RowKind
+ * @see RowKind 变更的类型，包含插入、更新、删除等。
  */
 @PublicEvolving
 public final class ChangelogMode {
 
+    // 只包含插入类型的变更日志
     private static final ChangelogMode INSERT_ONLY =
             ChangelogMode.newBuilder().addContainedKind(RowKind.INSERT).build();
 
+    // 包含插入、更新后、删除三种类型的变更日志
     private static final ChangelogMode UPSERT =
             ChangelogMode.newBuilder()
-                    .addContainedKind(RowKind.INSERT)
-                    .addContainedKind(RowKind.UPDATE_AFTER)
-                    .addContainedKind(RowKind.DELETE)
+                    .addContainedKind(RowKind.INSERT)    // 插入
+                    .addContainedKind(RowKind.UPDATE_AFTER) // 更新（更新后的数据）
+                    .addContainedKind(RowKind.DELETE)   // 删除
                     .build();
 
+    // 包含所有变更类型：插入、更新前、更新后、删除
     private static final ChangelogMode ALL =
             ChangelogMode.newBuilder()
-                    .addContainedKind(RowKind.INSERT)
-                    .addContainedKind(RowKind.UPDATE_BEFORE)
-                    .addContainedKind(RowKind.UPDATE_AFTER)
-                    .addContainedKind(RowKind.DELETE)
+                    .addContainedKind(RowKind.INSERT)      // 插入
+                    .addContainedKind(RowKind.UPDATE_BEFORE) // 更新前的数据
+                    .addContainedKind(RowKind.UPDATE_AFTER)  // 更新后的数据
+                    .addContainedKind(RowKind.DELETE)       // 删除
                     .build();
 
-    private final Set<RowKind> kinds;
+    private final Set<RowKind> kinds; // 存储变更的类型
 
+    // 私有构造函数，创建一个包含特定变更类型的变更日志
     private ChangelogMode(Set<RowKind> kinds) {
+        // 确保变更日志至少包含一个变更类型
         Preconditions.checkArgument(
                 kinds.size() > 0, "At least one kind of row should be contained in a changelog.");
-        this.kinds = Collections.unmodifiableSet(kinds);
+        this.kinds = Collections.unmodifiableSet(kinds); // 不可修改的集合
     }
 
-    /** Shortcut for a simple {@link RowKind#INSERT}-only changelog. */
+    /**
+     * 获取一个只包含插入类型变更的变更日志。
+     */
     public static ChangelogMode insertOnly() {
         return INSERT_ONLY;
     }
 
     /**
-     * Shortcut for an upsert changelog that describes idempotent updates on a key and thus does not
-     * contain {@link RowKind#UPDATE_BEFORE} rows.
+     * 获取一个包含插入、更新后、删除类型的变更日志，表示幂等更新的变更日志，
+     * 并且不包含更新前的数据（{@link RowKind#UPDATE_BEFORE}）。
      */
     public static ChangelogMode upsert() {
         return UPSERT;
     }
 
-    /** Shortcut for a changelog that can contain all {@link RowKind}s. */
+    /**
+     * 获取一个可以包含所有变更类型（插入、更新前、更新后、删除）的变更日志。
+     */
     public static ChangelogMode all() {
         return ALL;
     }
 
-    /** Builder for configuring and creating instances of {@link ChangelogMode}. */
+    /**
+     * 返回一个构建器，可以用于配置并创建 {@link ChangelogMode} 实例。
+     */
     public static Builder newBuilder() {
         return new Builder();
     }
 
+    // 获取变更日志中包含的所有变更类型
     public Set<RowKind> getContainedKinds() {
         return kinds;
     }
 
+    // 判断变更日志中是否包含指定的变更类型
     public boolean contains(RowKind kind) {
         return kinds.contains(kind);
     }
 
+    // 判断变更日志是否只包含某个特定的变更类型
     public boolean containsOnly(RowKind kind) {
         return kinds.size() == 1 && kinds.contains(kind);
     }
@@ -105,38 +119,51 @@ public final class ChangelogMode {
             return false;
         }
         ChangelogMode that = (ChangelogMode) o;
-        return kinds.equals(that.kinds);
+        return kinds.equals(that.kinds); // 比较变更类型集合是否相等
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(kinds);
+        return Objects.hash(kinds); // 计算哈希值
     }
 
     @Override
     public String toString() {
-        return kinds.toString();
+        return kinds.toString(); // 返回变更类型集合的字符串表示
     }
 
     // --------------------------------------------------------------------------------------------
 
-    /** Builder for configuring and creating instances of {@link ChangelogMode}. */
+    /**
+     * 用于配置并创建 {@link ChangelogMode} 实例的构建器类。
+     * 该类支持流式构建模式，可以方便地逐步添加包含的变更类型。
+     */
     @PublicEvolving
     public static class Builder {
 
-        private final Set<RowKind> kinds = EnumSet.noneOf(RowKind.class);
+        private final Set<RowKind> kinds = EnumSet.noneOf(RowKind.class); // 存储变更类型
 
         private Builder() {
-            // default constructor to allow a fluent definition
+            // 默认构造函数，允许流式定义
         }
 
+        /**
+         * 向变更日志中添加一个变更类型
+         * @param kind 变更类型
+         * @return 当前构建器实例
+         */
         public Builder addContainedKind(RowKind kind) {
             this.kinds.add(kind);
-            return this;
+            return this; // 返回构建器自身，以支持链式调用
         }
 
+        /**
+         * 构建并返回一个 {@link ChangelogMode} 实例
+         * @return 配置好的变更日志模式
+         */
         public ChangelogMode build() {
-            return new ChangelogMode(kinds);
+            return new ChangelogMode(kinds); // 使用已配置的变更类型集合创建 ChangelogMode 实例
         }
     }
 }
+

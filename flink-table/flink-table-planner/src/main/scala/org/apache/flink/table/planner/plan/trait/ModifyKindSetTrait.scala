@@ -24,79 +24,87 @@ import org.apache.calcite.plan.{RelOptPlanner, RelTrait, RelTraitDef}
 
 import scala.collection.JavaConversions._
 
-/** ModifyKindSetTrait is used to describe what modify operation will be produced by this node. */
 /**
- * @授课老师: 码界探索
- * @微信: 252810631
- * @版权所有: 请尊重劳动成果
- * ModifyKindSetTrait用于描述此节点将产生什么修改操作
+ * ModifyKindSetTrait用于描述此节点将产生的修改操作类型。
+ * 该特性表示节点可能会执行的修改操作，比如插入、更新或删除。
  */
 class ModifyKindSetTrait(val modifyKindSet: ModifyKindSet) extends RelTrait {
 
+  /**
+   * 判断当前特性是否满足给定的特性要求。
+   * 当当前的修改操作集合包含在要求的修改操作集合中时，返回true。
+   * 例如：[I, U] 满足 [I, U, D]，但 [I, U, D] 不满足 [I, D]。
+   */
   override def satisfies(relTrait: RelTrait): Boolean = relTrait match {
     case other: ModifyKindSetTrait =>
-      // it’s satisfied when modify kinds are included in the required set,
-      // e.g. [I,U] satisfy [I,U,D]
-      //      [I,U,D] not satisfy [I,D]
+      // 当当前的修改操作集合包含在目标修改操作集合中时返回true
       this.modifyKindSet.getContainedKinds.forall(other.modifyKindSet.contains)
     case _ => false
   }
 
+  /**
+   * 获取当前特性定义。
+   * 这里返回的是ModifyKindSetTrait的定义实例。
+   */
   override def getTraitDef: RelTraitDef[_ <: RelTrait] = ModifyKindSetTraitDef.INSTANCE
 
+  /**
+   * 注册当前特性到给定的优化器规划器中。
+   * 目前该方法为空，表示没有具体的注册行为。
+   */
   override def register(planner: RelOptPlanner): Unit = {}
 
+  /**
+   * 重写hashCode方法，用于基于修改操作集合的哈希值计算当前对象的哈希值。
+   */
   override def hashCode(): Int = modifyKindSet.hashCode()
 
+  /**
+   * 重写equals方法，用于比较当前特性是否等于给定的对象。
+   * 比较的是修改操作集合是否相等。
+   */
   override def equals(obj: Any): Boolean = obj match {
     case t: ModifyKindSetTrait => this.modifyKindSet.equals(t.modifyKindSet)
     case _ => false
   }
 
+  /**
+   * 重写toString方法，返回修改操作集合的字符串表示。
+   */
   override def toString: String = s"[${modifyKindSet.toString}]"
 }
 
 object ModifyKindSetTrait {
 
-  /** An empty [[ModifyKindSetTrait]] which doesn't contain any [[ModifyKind]]. */
   /**
-   * @授课老师: 码界探索
-   * @微信: 252810631
-   * @版权所有: 请尊重劳动成果
    * 一个空的[[ModifyKindSetTrait]]，不包含任何[[ModifyKind]]。
    * 这意味着该特性表示的操作节点不涉及任何修改操作，如插入、删除或更新。
    */
   val EMPTY = new ModifyKindSetTrait(ModifyKindSet.newBuilder().build())
 
-  /** Insert-only [[ModifyKindSetTrait]]. */
   /**
-   * @授课老师: 码界探索
-   * @微信: 252810631
-   * @版权所有: 请尊重劳动成果
    * 仅包含插入操作的[[ModifyKindSetTrait]]。
    * 这表明该特性描述的操作节点只产生插入操作，不涉及删除或更新。
    */
   val INSERT_ONLY = new ModifyKindSetTrait(ModifyKindSet.INSERT_ONLY)
 
-  /** A modify [[ModifyKindSetTrait]] that contains all change operations. */
   /**
-   * @授课老师: 码界探索
-   * @微信: 252810631
-   * @版权所有: 请尊重劳动成果
    * 包含所有变更操作的[[ModifyKindSetTrait]]。
    * 这意味着该特性描述的操作节点可能产生插入、删除或更新中的任何一种或多种操作。
    */
   val ALL_CHANGES = new ModifyKindSetTrait(ModifyKindSet.ALL_CHANGES)
 
-  /** Creates an instance of [[ModifyKindSetTrait]] from th given [[ChangelogMode]]. */
+  /**
+   * 从给定的[[ChangelogMode]]创建一个[[ModifyKindSetTrait]]实例。
+   * 根据ChangelogMode中的变更类型，构建相应的修改操作集合。
+   */
   def fromChangelogMode(changelogMode: ChangelogMode): ModifyKindSetTrait = {
     val builder = ModifyKindSet.newBuilder
     changelogMode.getContainedKinds.foreach {
-      case RowKind.INSERT => builder.addContainedKind(ModifyKind.INSERT)
-      case RowKind.DELETE => builder.addContainedKind(ModifyKind.DELETE)
-      case _ => builder.addContainedKind(ModifyKind.UPDATE) // otherwise updates
+      case RowKind.INSERT => builder.addContainedKind(ModifyKind.INSERT) // 插入操作
+      case RowKind.DELETE => builder.addContainedKind(ModifyKind.DELETE) // 删除操作
+      case _ => builder.addContainedKind(ModifyKind.UPDATE) // 否则，视为更新操作
     }
-    new ModifyKindSetTrait(builder.build)
+    new ModifyKindSetTrait(builder.build) // 使用构建器创建ModifyKindSetTrait实例
   }
-
 }
