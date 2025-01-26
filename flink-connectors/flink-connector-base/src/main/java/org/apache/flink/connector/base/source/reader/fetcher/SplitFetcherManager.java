@@ -49,77 +49,79 @@ import java.util.function.Supplier;
 import static org.apache.flink.configuration.PipelineOptions.ALLOW_UNALIGNED_SOURCE_SPLITS;
 
 /**
- * A class responsible for starting the {@link SplitFetcher} and manage the life cycles of them.
- * This class works with the {@link SourceReaderBase}.
+ * 负责启动 {@link SplitFetcher} 并管理其生命周期的类。
+ * 此类与 {@link SourceReaderBase} 配合使用。
  *
- * <p>The split fetcher manager could be used to support different threading models by implementing
- * the {@link #addSplits(List)} method differently. For example, a single thread split fetcher
- * manager would only start a single fetcher and assign all the splits to it. A one-thread-per-split
- * fetcher may spawn a new thread every time a new split is assigned.
+ * <p>通过不同实现 {@link #addSplits(List)} 方法，分片抓取器管理器可以支持不同的线程模型。
+ * 例如：单线程分片抓取器管理器只会启动一个抓取器并将所有分片分配给它；
+ * 而每个分片一个线程的抓取器会在每次分配新分片时创建一个新线程。
  */
 @PublicEvolving
 public abstract class SplitFetcherManager<E, SplitT extends SourceSplit> {
+    // 日志记录器，用于记录相关的日志信息
     private static final Logger LOG = LoggerFactory.getLogger(SplitFetcherManager.class);
 
+    // 用于处理错误的消费者（函数式接口），接收Throwable对象
     private final Consumer<Throwable> errorHandler;
 
-    /** An atomic integer to generate monotonically increasing fetcher ids. */
+    /** 原子整数，用于生成递增的抓取器ID。 */
     private final AtomicInteger fetcherIdGenerator;
 
-    /** A supplier to provide split readers. */
+    /** 提供分片读取器的供应器（工厂模式）。 */
     private final Supplier<SplitReader<E, SplitT>> splitReaderFactory;
 
-    /** Uncaught exception in the split fetchers. */
+    /** 保存分片抓取器中未捕获的异常。 */
     private final AtomicReference<Throwable> uncaughtFetcherException;
 
-    /** The element queue that the split fetchers will put elements into. */
+    /** 分片抓取器将数据元素放入的队列。 */
     private final FutureCompletingBlockingQueue<RecordsWithSplitIds<E>> elementsQueue;
 
-    /** A map keeping track of all the split fetchers. */
+    /** 一个映射，用于跟踪所有分片抓取器的状态，键为抓取器ID，值为对应的抓取器对象。 */
     protected final Map<Integer, SplitFetcher<E, SplitT>> fetchers;
 
     /**
-     * An executor service with two threads. One for the fetcher and one for the future completing
-     * thread.
+     * 执行服务，拥有两个线程：
+     * 一个用于分片抓取器，另一个用于完成Future的线程。
      */
     private final ExecutorService executors;
 
-    /** Indicating the split fetcher manager has closed or not. */
+    /** 标志分片抓取器管理器是否已关闭。 */
     private volatile boolean closed;
 
     /**
-     * Hook for handling finished splits in {@link SplitFetcher}, usually used for testing split
-     * finishing behavior of {@link SplitFetcher} and {@link SplitReader}.
+     * 分片完成时的处理钩子（函数式接口），通常用于测试 {@link SplitFetcher} 和 {@link SplitReader}
+     * 的分片完成行为。接收一个分片ID集合作为输入参数。
      */
     private final Consumer<Collection<String>> splitFinishedHook;
 
+    /** 是否允许非对齐的源分片。 */
     private final boolean allowUnalignedSourceSplits;
 
     /**
-     * Create a split fetcher manager.
+     * 创建一个分片抓取器管理器。
      *
-     * @param elementsQueue the queue that split readers will put elements into.
-     * @param splitReaderFactory a supplier that could be used to create split readers.
-     * @param configuration the configuration of this fetcher manager.
-     * @deprecated Please use {@link #SplitFetcherManager(Supplier, Configuration)} instead.
+     * @param elementsQueue 分片读取器将数据元素放入的队列。
+     * @param splitReaderFactory 一个用于创建分片读取器的供应器。
+     * @param configuration 此抓取器管理器的配置。
+     * @deprecated 请使用 {@link #SplitFetcherManager(Supplier, Configuration)} 替代。
      */
     @Deprecated
     public SplitFetcherManager(
             FutureCompletingBlockingQueue<RecordsWithSplitIds<E>> elementsQueue,
             Supplier<SplitReader<E, SplitT>> splitReaderFactory,
             Configuration configuration) {
+        // 调用另一个构造函数，并传递一个空的完成分片处理钩子。
         this(elementsQueue, splitReaderFactory, configuration, (ignore) -> {});
     }
 
     /**
-     * Create a split fetcher manager.
+     * 创建一个分片抓取器管理器。
      *
-     * @param elementsQueue the queue that split readers will put elements into.
-     * @param splitReaderFactory a supplier that could be used to create split readers.
-     * @param configuration the configuration of this fetcher manager.
-     * @param splitFinishedHook Hook for handling finished splits in split fetchers.
-     * @deprecated Please use {@link #SplitFetcherManager(Supplier, Configuration, Consumer)}
-     *     instead.
+     * @param elementsQueue 分片读取器将数据元素放入的队列。
+     * @param splitReaderFactory 一个用于创建分片读取器的供应器。
+     * @param configuration 此抓取器管理器的配置。
+     * @param splitFinishedHook 用于处理分片完成的钩子函数。
+     * @deprecated 请使用 {@link #SplitFetcherManager(Supplier, Configuration, Consumer)} 替代。
      */
     @Deprecated
     @VisibleForTesting
@@ -128,106 +130,162 @@ public abstract class SplitFetcherManager<E, SplitT extends SourceSplit> {
             Supplier<SplitReader<E, SplitT>> splitReaderFactory,
             Configuration configuration,
             Consumer<Collection<String>> splitFinishedHook) {
+        // 初始化分片读取器数据队列
         this.elementsQueue = elementsQueue;
-        this.errorHandler =
-                new Consumer<Throwable>() {
-                    @Override
-                    public void accept(Throwable t) {
-                        LOG.error("Received uncaught exception.", t);
-                        if (!uncaughtFetcherException.compareAndSet(null, t)) {
-                            // Add the exception to the exception list.
-                            uncaughtFetcherException.get().addSuppressed(t);
-                        }
-                        // Wake up the main thread to let it know the exception.
-                        elementsQueue.notifyAvailable();
-                    }
-                };
+
+        // 初始化错误处理器，处理抓取器中未捕获的异常
+        this.errorHandler = new Consumer<Throwable>() {
+            @Override
+            public void accept(Throwable t) {
+                // 记录异常日志
+                LOG.error("收到未捕获的异常。", t);
+                // 如果当前未记录任何异常，则记录此异常；否则将异常添加到原有异常的 suppressed 列表中
+                if (!uncaughtFetcherException.compareAndSet(null, t)) {
+                    uncaughtFetcherException.get().addSuppressed(t);
+                }
+                // 通知主线程异常发生，唤醒队列以触发后续处理
+                elementsQueue.notifyAvailable();
+            }
+        };
+
+        // 初始化分片读取器的工厂供应器
         this.splitReaderFactory = splitReaderFactory;
+
+        // 设置分片完成的处理钩子
         this.splitFinishedHook = splitFinishedHook;
+
+        // 初始化未捕获的异常引用
         this.uncaughtFetcherException = new AtomicReference<>(null);
+
+        // 初始化分片抓取器ID生成器
         this.fetcherIdGenerator = new AtomicInteger(0);
+
+        // 初始化抓取器映射，用于跟踪所有的分片抓取器
         this.fetchers = new ConcurrentHashMap<>();
+
+        // 从配置中读取是否允许非对齐的源分片
         this.allowUnalignedSourceSplits = configuration.get(ALLOW_UNALIGNED_SOURCE_SPLITS);
 
-        // Create the executor with a thread factory that fails the source reader if one of
-        // the fetcher thread exits abnormally.
+        // 创建执行器服务，使用自定义线程工厂以确保当抓取线程异常退出时通知源读取器
         final String taskThreadName = Thread.currentThread().getName();
-        this.executors =
-                Executors.newCachedThreadPool(
-                        r -> new Thread(r, "Source Data Fetcher for " + taskThreadName));
+        this.executors = Executors.newCachedThreadPool(r -> new Thread(r, "Source Data Fetcher for " + taskThreadName));
+
+        // 初始化关闭标志为 false
         this.closed = false;
     }
 
+
     /**
-     * Create a split fetcher manager.
+     * 创建一个分片抓取器管理器。
      *
-     * @param splitReaderFactory a supplier that could be used to create split readers.
-     * @param configuration the configuration of this fetcher manager.
+     * @param splitReaderFactory 用于创建分片读取器的供应器（工厂方法）。
+     * @param configuration 此分片抓取器管理器的配置。
      */
     public SplitFetcherManager(
             Supplier<SplitReader<E, SplitT>> splitReaderFactory, Configuration configuration) {
+        // 调用另一个构造函数并传入空的分片完成钩子函数
         this(splitReaderFactory, configuration, (ignore) -> {});
     }
 
     /**
-     * Create a split fetcher manager.
+     * 创建一个分片抓取器管理器。
      *
-     * @param splitReaderFactory a supplier that could be used to create split readers.
-     * @param configuration the configuration of this fetcher manager.
-     * @param splitFinishedHook Hook for handling finished splits in split fetchers.
+     * @param splitReaderFactory 用于创建分片读取器的供应器。
+     * @param configuration 此分片抓取器管理器的配置。
+     * @param splitFinishedHook 分片完成时的钩子函数，用于处理完成的分片。
      */
     public SplitFetcherManager(
             Supplier<SplitReader<E, SplitT>> splitReaderFactory,
             Configuration configuration,
             Consumer<Collection<String>> splitFinishedHook) {
+        // 初始化元素队列，用于存储分片读取器产生的元素，队列容量从配置中读取
         this.elementsQueue =
                 new FutureCompletingBlockingQueue<>(
                         configuration.get(SourceReaderOptions.ELEMENT_QUEUE_CAPACITY));
-        this.errorHandler =
-                new Consumer<Throwable>() {
-                    @Override
-                    public void accept(Throwable t) {
-                        LOG.error("Received uncaught exception.", t);
-                        if (!uncaughtFetcherException.compareAndSet(null, t)) {
-                            // Add the exception to the exception list.
-                            uncaughtFetcherException.get().addSuppressed(t);
-                        }
-                        // Wake up the main thread to let it know the exception.
-                        elementsQueue.notifyAvailable();
-                    }
-                };
+
+        // 初始化错误处理器，处理分片抓取器未捕获的异常
+        this.errorHandler = new Consumer<Throwable>() {
+            @Override
+            public void accept(Throwable t) {
+                LOG.error("收到未捕获的异常。", t);
+                if (!uncaughtFetcherException.compareAndSet(null, t)) {
+                    uncaughtFetcherException.get().addSuppressed(t);
+                }
+                // 唤醒主线程，通知异常发生
+                elementsQueue.notifyAvailable();
+            }
+        };
+
+        // 初始化分片读取器工厂和分片完成钩子
         this.splitReaderFactory = splitReaderFactory;
         this.splitFinishedHook = splitFinishedHook;
+
+        // 初始化未捕获异常引用
         this.uncaughtFetcherException = new AtomicReference<>(null);
+
+        // 初始化抓取器ID生成器，从0开始递增
         this.fetcherIdGenerator = new AtomicInteger(0);
+
+        // 初始化分片抓取器映射，用于管理所有的抓取器实例
         this.fetchers = new ConcurrentHashMap<>();
+
+        // 从配置中读取是否允许非对齐的源分片
         this.allowUnalignedSourceSplits = configuration.get(ALLOW_UNALIGNED_SOURCE_SPLITS);
 
-        // Create the executor with a thread factory that fails the source reader if one of
-        // the fetcher thread exits abnormally.
+        // 创建线程池，确保抓取器线程异常退出时可以通知源读取器
         final String taskThreadName = Thread.currentThread().getName();
         this.executors =
                 Executors.newCachedThreadPool(
                         r -> new Thread(r, "Source Data Fetcher for " + taskThreadName));
+
+        // 初始化关闭标志为 false
         this.closed = false;
     }
 
+    /**
+     * 添加分片的抽象方法，需由具体子类实现。
+     *
+     * @param splitsToAdd 要添加的分片列表。
+     */
     public abstract void addSplits(List<SplitT> splitsToAdd);
 
+    /**
+     * 移除分片的抽象方法，需由具体子类实现。
+     *
+     * @param splitsToRemove 要移除的分片列表。
+     */
     public abstract void removeSplits(List<SplitT> splitsToRemove);
 
+    /**
+     * 暂停或恢复指定的分片。
+     *
+     * @param splitIdsToPause 要暂停的分片ID集合。
+     * @param splitIdsToResume 要恢复的分片ID集合。
+     */
     public void pauseOrResumeSplits(
             Collection<String> splitIdsToPause, Collection<String> splitIdsToResume) {
         for (SplitFetcher<E, SplitT> fetcher : fetchers.values()) {
+            // 获取当前抓取器中分片的分配映射
             Map<String, SplitT> idToSplit = fetcher.assignedSplits();
+
+            // 查找需要暂停和恢复的分片
             List<SplitT> splitsToPause = lookupInAssignment(splitIdsToPause, idToSplit);
             List<SplitT> splitsToResume = lookupInAssignment(splitIdsToResume, idToSplit);
+
+            // 如果存在需要暂停或恢复的分片，则调用抓取器的暂停或恢复方法
             if (!splitsToPause.isEmpty() || !splitsToResume.isEmpty()) {
                 fetcher.pauseOrResumeSplits(splitsToPause, splitsToResume);
             }
         }
     }
 
+    /**
+     * 根据分片ID集合从分配映射中查找对应的分片。
+     *
+     * @param splitIds 要查找的分片ID集合。
+     * @param assignment 分片的分配映射。
+     * @return 找到的分片列表。
+     */
     private List<SplitT> lookupInAssignment(
             Collection<String> splitIds, Map<String, SplitT> assignment) {
         List<SplitT> splits = new ArrayList<>();
@@ -240,25 +298,33 @@ public abstract class SplitFetcherManager<E, SplitT extends SourceSplit> {
         return splits;
     }
 
+    /**
+     * 启动分片抓取器，将其提交到执行器中运行。
+     *
+     * @param fetcher 要启动的分片抓取器。
+     */
     protected void startFetcher(SplitFetcher<E, SplitT> fetcher) {
         executors.submit(fetcher);
     }
 
     /**
-     * Synchronize method to ensure no fetcher is created after the split fetcher manager has
-     * closed.
+     * 同步方法，确保在抓取器管理器关闭后不再创建抓取器。
      *
-     * @return the created split fetcher.
-     * @throws IllegalStateException if the split fetcher manager has closed.
+     * @return 创建的分片抓取器。
+     * @throws IllegalStateException 如果抓取器管理器已关闭。
      */
     protected synchronized SplitFetcher<E, SplitT> createSplitFetcher() {
         if (closed) {
-            throw new IllegalStateException("The split fetcher manager has closed.");
+            throw new IllegalStateException("分片抓取器管理器已关闭。");
         }
-        // Create SplitReader.
+
+        // 使用供应器创建分片读取器
         SplitReader<E, SplitT> splitReader = splitReaderFactory.get();
 
+        // 生成抓取器ID
         int fetcherId = fetcherIdGenerator.getAndIncrement();
+
+        // 创建新的分片抓取器
         SplitFetcher<E, SplitT> splitFetcher =
                 new SplitFetcher<>(
                         fetcherId,
@@ -267,41 +333,48 @@ public abstract class SplitFetcherManager<E, SplitT extends SourceSplit> {
                         errorHandler,
                         () -> {
                             fetchers.remove(fetcherId);
-                            // We need this to synchronize status of fetchers to concurrent partners
-                            // as
-                            // ConcurrentHashMap's aggregate status methods including size, isEmpty,
-                            // and
-                            // containsValue are not designed for program control.
+                            // 同步抓取器的状态，通知队列分片状态的变化
                             elementsQueue.notifyAvailable();
                         },
                         this.splitFinishedHook,
                         allowUnalignedSourceSplits);
+
+        // 将抓取器添加到映射中
         fetchers.put(fetcherId, splitFetcher);
+
         return splitFetcher;
     }
 
+
     /**
-     * Check and shutdown the fetchers that have completed their work.
+     * 检查并关闭已完成工作的分片抓取器。
      *
-     * @return true if all the fetchers have completed the work, false otherwise.
+     * @return 如果所有抓取器都已完成工作，返回 true；否则返回 false。
      */
     public boolean maybeShutdownFinishedFetchers() {
+        // 遍历当前所有分片抓取器
         Iterator<Map.Entry<Integer, SplitFetcher<E, SplitT>>> iter = fetchers.entrySet().iterator();
         while (iter.hasNext()) {
             Map.Entry<Integer, SplitFetcher<E, SplitT>> entry = iter.next();
             SplitFetcher<E, SplitT> fetcher = entry.getValue();
+
+            // 如果抓取器处于空闲状态（已完成工作）
             if (fetcher.isIdle()) {
-                LOG.info("Closing splitFetcher {} because it is idle.", entry.getKey());
-                fetcher.shutdown();
-                iter.remove();
+                LOG.info("关闭分片抓取器 {}，因为它处于空闲状态。", entry.getKey());
+                fetcher.shutdown(); // 关闭抓取器
+                iter.remove(); // 从映射中移除
             }
         }
+
+        // 如果所有抓取器都已被移除，则返回 true；否则返回 false
         return fetchers.isEmpty();
     }
 
     /**
-     * Return the queue contains data produced by split fetchers.This method is Internal and only
-     * used in {@link SourceReaderBase}.
+     * 返回包含分片抓取器产生数据的队列。
+     * 此方法为内部方法，仅供 {@link SourceReaderBase} 使用。
+     *
+     * @return 包含数据的队列。
      */
     @Internal
     public FutureCompletingBlockingQueue<RecordsWithSplitIds<E>> getQueue() {
@@ -309,35 +382,51 @@ public abstract class SplitFetcherManager<E, SplitT extends SourceSplit> {
     }
 
     /**
-     * Close the split fetcher manager.
+     * 关闭分片抓取器管理器。
      *
-     * @param timeoutMs the max time in milliseconds to wait.
-     * @throws Exception when failed to close the split fetcher manager.
+     * @param timeoutMs 等待关闭的最大时间（毫秒）。
+     * @throws Exception 如果关闭分片抓取器管理器失败。
      */
     public synchronized void close(long timeoutMs) throws Exception {
+        // 标记抓取器管理器为已关闭
         closed = true;
+
+        // 关闭所有分片抓取器
         fetchers.values().forEach(SplitFetcher::shutdown);
+
+        // 关闭执行器服务
         executors.shutdown();
+
+        // 等待执行器中的所有任务在指定时间内完成
         if (!executors.awaitTermination(timeoutMs, TimeUnit.MILLISECONDS)) {
             LOG.warn(
-                    "Failed to close the source reader in {} ms. There are still {} split fetchers running",
+                    "在 {} 毫秒内未能关闭源读取器。仍有 {} 个分片抓取器正在运行。",
                     timeoutMs,
                     fetchers.size());
         }
     }
 
+    /**
+     * 检查分片抓取器中的异常。
+     * 如果有未捕获的异常，则抛出一个运行时异常。
+     */
     public void checkErrors() {
         if (uncaughtFetcherException.get() != null) {
             throw new RuntimeException(
-                    "One or more fetchers have encountered exception",
+                    "一个或多个抓取器遇到了异常。",
                     uncaughtFetcherException.get());
         }
     }
 
-    // -----------------------
-
+    /**
+     * 返回当前存活的分片抓取器数量。
+     * 此方法仅用于测试目的。
+     *
+     * @return 当前存活的分片抓取器数量。
+     */
     @VisibleForTesting
     public int getNumAliveFetchers() {
         return fetchers.size();
     }
+
 }

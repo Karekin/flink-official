@@ -28,96 +28,83 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 
 /**
- * This class is used to coordinate between two components, where one component has an executor
- * following the mailbox model and the other component notifies it when needed.
+ * 这个类用于在两个组件之间进行协调，其中一个组件有一个基于Mailbox模型的执行器，
+ * 而另一个组件在需要时通知它。
  */
 public class ExecutorNotifier {
     private static final Logger LOG = LoggerFactory.getLogger(ExecutorNotifier.class);
-    private final ScheduledExecutorService workerExecutor;
-    private final Executor executorToNotify;
+    private final ScheduledExecutorService workerExecutor; // 负责执行任务的调度线程池
+    private final Executor executorToNotify; // 被通知执行任务的执行器
 
+    /**
+     * 构造方法。
+     *
+     * @param workerExecutor 用于执行后台任务的调度线程池
+     * @param executorToNotify 用于接收通知并执行结果处理的执行器
+     */
     public ExecutorNotifier(ScheduledExecutorService workerExecutor, Executor executorToNotify) {
         this.executorToNotify = executorToNotify;
         this.workerExecutor = workerExecutor;
     }
 
     /**
-     * Call the given callable once. Notify the {@link #executorToNotify} to execute the handler.
+     * 执行给定的 Callable 一次，并通知 {@link #executorToNotify} 来执行结果处理。
      *
-     * <p>Note that when this method is invoked multiple times, it is possible that multiple
-     * callables are executed concurrently, so do the handlers. For example, assuming both the
-     * workerExecutor and executorToNotify are single threaded. The following code may still throw a
-     * <code>ConcurrentModificationException</code>.
+     * <p>注意：当此方法被多次调用时，可能会导致多个 Callable 同时执行，
+     * 处理程序（handler）也可能会并发执行。例如，假设 workerExecutor 和
+     * executorToNotify 都是单线程的，以下代码可能仍会抛出
+     * <code>ConcurrentModificationException</code>。
      *
      * <pre>{@code
      * final List<Integer> list = new ArrayList<>();
      *
-     * // The callable adds an integer 1 to the list, while it works at the first glance,
-     * // A ConcurrentModificationException may be thrown because the caller and
-     * // handler may modify the list at the same time.
+     * // Callable 向列表添加整数 1，表面上看没问题，
+     * // 但可能会因为 Callable 和 handler 同时修改列表而抛出异常。
      * notifier.notifyReadyAsync(
-     * 	() -> list.add(1),
-     * 	(ignoredValue, ignoredThrowable) -> list.add(2));
+     *     () -> list.add(1),
+     *     (ignoredValue, ignoredThrowable) -> list.add(2));
      * }</pre>
      *
-     * <p>Instead, the above logic should be implemented in as:
+     * <p>正确的实现方式应该是：
      *
      * <pre>{@code
-     * // Modify the state in the handler.
+     * // 在 handler 中修改状态。
      * notifier.notifyReadyAsync(() -> 1, (v, ignoredThrowable) -> {
-     * 	list.add(v));
-     * 	list.add(2);
+     *     list.add(v);
+     *     list.add(2);
      * });
      * }</pre>
      *
-     * @param callable the callable to invoke before notifying the executor.
-     * @param handler the handler to handle the result of the callable.
+     * @param callable 要在通知执行器之前调用的 Callable
+     * @param handler 处理 Callable 返回结果的处理程序
+     * @param <T> Callable 返回值的类型
      */
     public <T> void notifyReadyAsync(Callable<T> callable, BiConsumer<T, Throwable> handler) {
         workerExecutor.execute(
                 () -> {
                     try {
+                        // 调用 Callable 并获取结果
                         T result = callable.call();
+                        // 通知 executorToNotify 执行处理程序
                         executorToNotify.execute(() -> handler.accept(result, null));
                     } catch (Throwable t) {
+                        // 如果发生异常，将异常传递给处理程序
                         executorToNotify.execute(() -> handler.accept(null, t));
                     }
                 });
     }
 
     /**
-     * Call the given callable once. Notify the {@link #executorToNotify} to execute the handler.
+     * 周期性地调用给定的 Callable，并通知 {@link #executorToNotify} 来执行结果处理。
      *
-     * <p>Note that when this method is invoked multiple times, it is possible that multiple
-     * callables are executed concurrently, so do the handlers. For example, assuming both the
-     * workerExecutor and executorToNotify are single threaded. The following code may still throw a
-     * <code>ConcurrentModificationException</code>.
+     * <p>注意：当此方法被多次调用时，可能会导致多个 Callable 和处理程序并发执行。
+     * 例如，与前一个方法类似，如果调度线程池和执行器都是单线程的，仍可能出现并发问题。
      *
-     * <pre>{@code
-     * final List<Integer> list = new ArrayList<>();
-     *
-     * // The callable adds an integer 1 to the list, while it works at the first glance,
-     * // A ConcurrentModificationException may be thrown because the caller and
-     * // handler may modify the list at the same time.
-     * notifier.notifyReadyAsync(
-     * 	() -> list.add(1),
-     * 	(ignoredValue, ignoredThrowable) -> list.add(2));
-     * }</pre>
-     *
-     * <p>Instead, the above logic should be implemented in as:
-     *
-     * <pre>{@code
-     * // Modify the state in the handler.
-     * notifier.notifyReadyAsync(() -> 1, (v, ignoredThrowable) -> {
-     * 	list.add(v));
-     * 	list.add(2);
-     * });
-     * }</pre>
-     *
-     * @param callable the callable to execute before notifying the executor to notify.
-     * @param handler the handler that handles the result from the callable.
-     * @param initialDelayMs the initial delay in ms before invoking the given callable.
-     * @param periodMs the interval in ms to invoke the callable.
+     * @param callable 要定期调用的 Callable
+     * @param handler 处理 Callable 返回结果的处理程序
+     * @param initialDelayMs 调用 Callable 前的初始延迟时间（毫秒）
+     * @param periodMs 调用 Callable 的周期时间（毫秒）
+     * @param <T> Callable 返回值的类型
      */
     public <T> void notifyReadyAsync(
             Callable<T> callable,
@@ -127,14 +114,18 @@ public class ExecutorNotifier {
         workerExecutor.scheduleAtFixedRate(
                 () -> {
                     try {
+                        // 调用 Callable 并获取结果
                         T result = callable.call();
+                        // 通知 executorToNotify 执行处理程序
                         executorToNotify.execute(() -> handler.accept(result, null));
                     } catch (Throwable t) {
+                        // 如果发生异常，将异常传递给处理程序
                         executorToNotify.execute(() -> handler.accept(null, t));
                     }
                 },
-                initialDelayMs,
-                periodMs,
-                TimeUnit.MILLISECONDS);
+                initialDelayMs, // 初始延迟时间
+                periodMs,       // 调用周期
+                TimeUnit.MILLISECONDS); // 时间单位为毫秒
     }
 }
+

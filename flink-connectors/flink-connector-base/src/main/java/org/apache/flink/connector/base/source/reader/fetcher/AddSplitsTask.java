@@ -26,14 +26,30 @@ import org.apache.flink.connector.base.source.reader.splitreader.SplitsAddition;
 import java.util.List;
 import java.util.Map;
 
-/** The task to add splits. */
+/**
+ * 一个任务类，用于向分片读取器中添加新的分片。
+ *
+ * @param <SplitT> 分片的类型，必须继承自 {@link SourceSplit}。
+ */
 @Internal
 class AddSplitsTask<SplitT extends SourceSplit> implements SplitFetcherTask {
 
+    // 分片读取器，用于处理分片的添加操作
     private final SplitReader<?, SplitT> splitReader;
+
+    // 待添加的分片列表
     private final List<SplitT> splitsToAdd;
+
+    // 当前已分配的分片映射（分片ID -> 分片）
     private final Map<String, SplitT> assignedSplits;
 
+    /**
+     * 构造函数。
+     *
+     * @param splitReader 分片读取器，用于管理分片的读取。
+     * @param splitsToAdd 要添加的分片列表。
+     * @param assignedSplits 当前已分配的分片映射，用于记录分片的分配状态。
+     */
     AddSplitsTask(
             SplitReader<?, SplitT> splitReader,
             List<SplitT> splitsToAdd,
@@ -43,20 +59,39 @@ class AddSplitsTask<SplitT extends SourceSplit> implements SplitFetcherTask {
         this.assignedSplits = assignedSplits;
     }
 
+    /**
+     * 执行添加分片的任务逻辑。
+     *
+     * <p>将 {@code splitsToAdd} 中的每个分片添加到 {@code assignedSplits} 映射中，
+     * 并调用分片读取器的 {@link SplitReader#handleSplitsChanges} 方法通知分片的更改。
+     *
+     * @return 总是返回 true，表示任务成功完成。
+     */
     @Override
     public boolean run() {
+        // 将待添加的分片逐一放入已分配的分片映射中
         for (SplitT s : splitsToAdd) {
             assignedSplits.put(s.splitId(), s);
         }
+
+        // 通知分片读取器处理分片的添加
         splitReader.handleSplitsChanges(new SplitsAddition<>(splitsToAdd));
         return true;
     }
 
+    /**
+     * 唤醒任务（此任务不需要唤醒逻辑，故为空实现）。
+     */
     @Override
     public void wakeUp() {
-        // Do nothing.
+        // 此任务不需要唤醒逻辑，因此不做任何处理
     }
 
+    /**
+     * 返回任务的字符串表示形式。
+     *
+     * @return 包含待添加分片信息的字符串。
+     */
     @Override
     public String toString() {
         return String.format("AddSplitsTask: [%s]", splitsToAdd);

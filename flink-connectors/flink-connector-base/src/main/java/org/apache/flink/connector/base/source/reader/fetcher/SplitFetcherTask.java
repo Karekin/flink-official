@@ -22,20 +22,29 @@ import org.apache.flink.annotation.PublicEvolving;
 
 import java.io.IOException;
 
-/** An interface similar to {@link Runnable} but allows throwing exceptions and wakeup. */
+/**
+ * 一个接口，类似于 {@link Runnable}，但允许抛出异常并支持唤醒操作。
+ */
 @PublicEvolving
 public interface SplitFetcherTask {
 
     /**
-     * Run the logic. This method allows throwing an interrupted exception on wakeup, but the
-     * implementation does not have to. It is preferred to finish the work elegantly and return a
-     * boolean to indicate whether all the jobs have been done or more invocation is needed.
+     * 执行任务的逻辑。该方法允许在唤醒时抛出中断异常，但实现类可以选择不抛出异常。
      *
-     * @return whether the runnable has successfully finished running.
-     * @throws IOException when the performed I/O operation fails.
+     * <p>建议实现逻辑优雅地完成任务，并通过返回一个布尔值来指示是否所有任务都已完成。
+     * 如果任务未完全完成，可以通过多次调用该方法来继续处理。
+     *
+     * @return 一个布尔值，表示任务是否成功完成运行。
+     *         - 如果返回 true，表示任务已成功完成，不需要进一步调用。
+     *         - 如果返回 false，表示还有任务未完成，需要继续调用该方法。
+     * @throws IOException 当执行的 I/O 操作失败时抛出该异常。
      */
     boolean run() throws IOException;
 
-    /** Wake up the running thread. */
+    /**
+     * 唤醒正在运行的线程。
+     *
+     * <p>当任务逻辑因某些条件阻塞时，调用此方法可中断阻塞状态，从而使线程可以继续运行。
+     */
     void wakeUp();
 }
