@@ -434,13 +434,13 @@ public class NFA<T> {
     }
 
     /**
-     * 处理当前事件，将其传递给 `NFA` 并更新匹配状态。
+     * 处理当前事件，计算所有可能的状态转换，并根据匹配策略筛选匹配结果。
      *
-     * @param sharedBufferAccessor 共享缓冲区访问器
-     * @param nfaState 当前 `NFAState`
-     * @param event 当前事件的包装器
+     * @param sharedBufferAccessor 共享缓冲区访问器，用于存储和检索匹配数据
+     * @param nfaState 当前 NFA 状态，包含所有活动计算状态
+     * @param event 当前处理的事件包装器
      * @param afterMatchSkipStrategy 匹配成功后的跳过策略
-     * @param timerService 提供时间服务
+     * @param timerService 提供时间相关的功能
      * @return 匹配成功的事件序列集合
      * @throws Exception 如果无法访问状态，则抛出异常
      */
@@ -452,65 +452,78 @@ public class NFA<T> {
             final TimerService timerService)
             throws Exception {
 
+        // 用于存储新的部分匹配状态，即尚未完成但可以继续匹配的状态
         final PriorityQueue<ComputationState> newPartialMatches =
                 new PriorityQueue<>(NFAState.COMPUTATION_STATE_COMPARATOR);
+
+        // 用于存储已完成匹配的状态，即满足整个模式匹配规则的事件序列
         PriorityQueue<ComputationState> potentialMatches =
                 new PriorityQueue<>(NFAState.COMPUTATION_STATE_COMPARATOR);
 
-        // 遍历所有活动计算状态
+        // 遍历当前 NFA 状态中的所有活动计算状态
         for (ComputationState computationState : nfaState.getPartialMatches()) {
+            // 计算当前状态在给定事件下的所有可能转换
             final Collection<ComputationState> newComputationStates =
                     computeNextStates(sharedBufferAccessor, computationState, event, timerService);
 
+            // 如果产生了新的计算状态，则标记 NFA 状态发生了变化
             if (newComputationStates.size() != 1) {
                 nfaState.setStateChanged();
             } else if (!newComputationStates.iterator().next().equals(computationState)) {
                 nfaState.setStateChanged();
             }
 
-            // delay adding new computation states in case a stop state is reached and we discard
-            // the path.
+            // 存储需要保留的计算状态，以便在下一次事件处理时继续
             final Collection<ComputationState> statesToRetain = new ArrayList<>();
-            // if stop state reached in this path
+            // 标记是否需要丢弃当前路径
             boolean shouldDiscardPath = false;
+
+            // 遍历所有新计算状态，决定如何处理它们
             for (final ComputationState newComputationState : newComputationStates) {
 
+                // 如果新状态是起始状态，并且有有效的起始时间戳，则标记新的部分匹配
                 if (isStartState(computationState) && newComputationState.getStartTimestamp() > 0) {
                     nfaState.setNewStartPartiailMatch();
                 }
 
+                // 如果新状态是最终状态，则添加到潜在匹配集合
                 if (isFinalState(newComputationState)) {
                     potentialMatches.add(newComputationState);
-                } else if (isStopState(newComputationState)) {
-                    // reached stop state. release entry for the stop state
+                }
+                // 如果新状态是终止状态，则释放该状态的关联节点
+                else if (isStopState(newComputationState)) {
                     shouldDiscardPath = true;
                     sharedBufferAccessor.releaseNode(
                             newComputationState.getPreviousBufferEntry(),
                             newComputationState.getVersion());
-                } else {
-                    // add new computation state; it will be processed once the next event arrives
+                }
+                // 其他情况，将新状态保留到 `statesToRetain`，以便下一事件处理时使用
+                else {
                     statesToRetain.add(newComputationState);
                 }
             }
 
+            // 如果路径被标记为丢弃，则释放该路径上所有状态的关联资源
             if (shouldDiscardPath) {
-                // a stop state was reached in this branch. release branch which results in removing
-                // previous event from
-                // the buffer
                 for (final ComputationState state : statesToRetain) {
                     sharedBufferAccessor.releaseNode(
                             state.getPreviousBufferEntry(), state.getVersion());
                 }
             } else {
+                // 否则，将新计算状态加入部分匹配状态集合，等待下一次事件匹配
                 newPartialMatches.addAll(statesToRetain);
             }
         }
 
+        // 如果发现了潜在的完整匹配状态，则标记 NFA 状态发生了变化
         if (!potentialMatches.isEmpty()) {
             nfaState.setStateChanged();
         }
 
+        // 存储最终匹配结果
         List<Map<String, List<T>>> result = new ArrayList<>();
+
+        // 根据跳过策略处理匹配结果
         processMatchesAccordingToSkipStrategy(
                 sharedBufferAccessor,
                 nfaState,
@@ -519,10 +532,13 @@ public class NFA<T> {
                 newPartialMatches,
                 result);
 
+        // 更新 NFA 状态，存储新的部分匹配状态
         nfaState.setNewPartialMatches(newPartialMatches);
 
+        // 返回匹配的事件序列集合
         return result;
     }
+
 
     /**
      * 处理匹配结果，并根据 `AfterMatchSkipStrategy` 进行跳过策略处理。
