@@ -397,7 +397,7 @@ public class CepOperator<IN, KEY, OUT>
         timerService = getInternalTimerService(
                 "watermark-callbacks", VoidNamespaceSerializer.INSTANCE, this);
 
-        // 2. 创建 `NFA` 实例，并进行初始化
+        // 2. 创建 `NFA` 实例，并进行初始化。初始化了所有的顶点statue 和边transition，这个时候的state集合已经初始化完成了
         nfa = nfaFactory.createNFA();
         nfa.open(cepRuntimeContext, new Configuration());
 
