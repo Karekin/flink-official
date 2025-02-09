@@ -30,62 +30,90 @@ import java.io.Serializable;
 import java.util.Objects;
 
 /**
- * An {@link OutputTag} is a typed and named tag to use for tagging side outputs of an operator.
+ * {@link OutputTag} 是 Flink 中用于定义 **侧输出流** (Side Output) 的标记类。
  *
- * <p>An {@code OutputTag} must always be an anonymous inner class so that Flink can derive a {@link
- * TypeInformation} for the generic type parameter.
+ * <p>在 Flink 任务中，侧输出流 (Side Output) 允许从一个 `DataStream` 任务中
+ * 发送不同类型的数据到不同的 `OutputTag`，用于处理迟到数据或分流不同类别的数据。
  *
- * <p>Example:
+ * <p>**使用示例:**
  *
  * <pre>{@code
- * OutputTag<Tuple2<String, Long>> info = new OutputTag<Tuple2<String, Long>>("late-data"){};
+ * // 创建一个用于存储迟到数据的 OutputTag
+ * OutputTag<Tuple2<String, Long>> lateDataTag = new OutputTag<Tuple2<String, Long>>("late-data"){};
+ *
+ * // 在主流处理逻辑中，将迟到的数据发送到侧输出
+ * mainStream.process(new ProcessFunction<Tuple2<String, Long>, String>() {
+ *     @Override
+ *     public void processElement(Tuple2<String, Long> value, Context ctx, Collector<String> out) {
+ *         if (isLate(value)) {
+ *             ctx.output(lateDataTag, value);
+ *         } else {
+ *             out.collect(value.f0);
+ *         }
+ *     }
+ * });
  * }</pre>
  *
- * @param <T> the type of elements in the side-output stream.
+ * <p>**注意事项:**
+ * - `OutputTag` 必须是 **匿名内部类**，以便 Flink 能够推导出 `TypeInformation`。
+ * - 不能使用泛型类型变量 (`Tuple2<A, B>`)，否则会导致类型推导失败。
+ *
+ * @param <T> 侧输出流中的数据类型
  */
 @PublicEvolving
 public class OutputTag<T> implements Serializable {
 
     private static final long serialVersionUID = 2L;
 
+    /** 侧输出流的唯一标识符 */
     private final String id;
 
+    /** 侧输出流的数据类型信息 */
     private final TypeInformation<T> typeInfo;
 
     /**
-     * Creates a new named {@code OutputTag} with the given id.
+     * 使用指定的 `id` 创建一个 `OutputTag`，用于标识侧输出流。
      *
-     * @param id The id of the created {@code OutputTag}.
+     * @param id 侧输出流的唯一标识符 (不能为 null 或 空字符串)。
      */
     public OutputTag(String id) {
-        Preconditions.checkNotNull(id, "OutputTag id cannot be null.");
-        Preconditions.checkArgument(!id.isEmpty(), "OutputTag id must not be empty.");
+        Preconditions.checkNotNull(id, "OutputTag id 不能为空.");
+        Preconditions.checkArgument(!id.isEmpty(), "OutputTag id 不能是空字符串.");
         this.id = id;
 
         try {
+            // 通过 Flink 的 `TypeExtractor` 自动推导 `TypeInformation`
             this.typeInfo = TypeExtractor.createTypeInfo(this, OutputTag.class, getClass(), 0);
         } catch (InvalidTypesException e) {
             throw new InvalidTypesException(
-                    "Could not determine TypeInformation for the OutputTag type. "
-                            + "The most common reason is forgetting to make the OutputTag an anonymous inner class. "
-                            + "It is also not possible to use generic type variables with OutputTags, such as 'Tuple2<A, B>'.",
+                    "无法推导 OutputTag 的 TypeInformation。\n"
+                            + "最常见的原因是：\n"
+                            + "  1. 忘记将 OutputTag 定义为匿名内部类。\n"
+                            + "  2. 使用了泛型变量，例如 'Tuple2<A, B>'，Flink 无法推导其类型。",
                     e);
         }
     }
 
     /**
-     * Creates a new named {@code OutputTag} with the given id and output {@link TypeInformation}.
+     * 使用指定的 `id` 和 `TypeInformation` 创建 `OutputTag`，用于标识侧输出流。
      *
-     * @param id The id of the created {@code OutputTag}.
-     * @param typeInfo The {@code TypeInformation} for the side output.
+     * @param id 侧输出流的唯一标识符 (不能为 null 或 空字符串)。
+     * @param typeInfo 侧输出流的数据类型信息。
      */
     public OutputTag(String id, TypeInformation<T> typeInfo) {
-        Preconditions.checkNotNull(id, "OutputTag id cannot be null.");
-        Preconditions.checkArgument(!id.isEmpty(), "OutputTag id must not be empty.");
+        Preconditions.checkNotNull(id, "OutputTag id 不能为空.");
+        Preconditions.checkArgument(!id.isEmpty(), "OutputTag id 不能是空字符串.");
         this.id = id;
-        this.typeInfo = Preconditions.checkNotNull(typeInfo, "TypeInformation cannot be null.");
+        this.typeInfo = Preconditions.checkNotNull(typeInfo, "TypeInformation 不能为空.");
     }
 
+    /**
+     * 判断 `other` 是否归属于 `owner` 的 `OutputTag`。
+     *
+     * @param owner 所属的 `OutputTag` (可能为 null)
+     * @param other 需要检查的 `OutputTag`
+     * @return 如果 `other` 与 `owner` 相等，则返回 `true`，否则返回 `false`
+     */
     public static boolean isResponsibleFor(
             @Nullable OutputTag<?> owner, @Nonnull OutputTag<?> other) {
         return other.equals(owner);
@@ -93,16 +121,32 @@ public class OutputTag<T> implements Serializable {
 
     // ------------------------------------------------------------------------
 
+    /**
+     * 获取 `OutputTag` 的唯一标识符。
+     *
+     * @return 侧输出流的 `id`
+     */
     public String getId() {
         return id;
     }
 
+    /**
+     * 获取 `OutputTag` 的数据类型信息。
+     *
+     * @return 侧输出流的数据类型 `TypeInformation`
+     */
     public TypeInformation<T> getTypeInfo() {
         return typeInfo;
     }
 
     // ------------------------------------------------------------------------
 
+    /**
+     * 比较两个 `OutputTag` 是否相等，仅基于 `id` 进行判断。
+     *
+     * @param obj 需要比较的对象
+     * @return 如果 `obj` 也是 `OutputTag` 且 `id` 相等，则返回 `true`，否则返回 `false`
+     */
     @Override
     public boolean equals(Object obj) {
         if (obj == this) {
@@ -115,13 +159,24 @@ public class OutputTag<T> implements Serializable {
         return Objects.equals(this.id, other.id);
     }
 
+    /**
+     * 计算 `OutputTag` 的哈希值，仅基于 `id` 计算。
+     *
+     * @return 哈希值
+     */
     @Override
     public int hashCode() {
         return id.hashCode();
     }
 
+    /**
+     * 生成 `OutputTag` 的字符串表示，包含 `TypeInformation` 和 `id`。
+     *
+     * @return `OutputTag` 的字符串表示
+     */
     @Override
     public String toString() {
         return "OutputTag(" + getTypeInfo() + ", " + id + ")";
     }
 }
+

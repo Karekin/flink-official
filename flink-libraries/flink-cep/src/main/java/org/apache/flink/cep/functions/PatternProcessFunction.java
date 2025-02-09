@@ -28,50 +28,92 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * It is called with a map of detected events which are identified by their names. The names are
- * defined by the {@link org.apache.flink.cep.pattern.Pattern} specifying the sought-after pattern.
- * This is the preferred way to process found matches.
+ * `PatternProcessFunction` 用于处理 Flink CEP 模式匹配后生成的结果。
+ *
+ * <p>当流数据匹配到指定的 {@link org.apache.flink.cep.pattern.Pattern} 模式后，
+ * Flink 会调用 `processMatch` 方法，并传入匹配到的事件列表。用户可以在 `processMatch`
+ * 方法中自定义逻辑，例如转换数据、聚合、发送到侧输出等。
+ *
+ * <p>**示例代码:**
  *
  * <pre>{@code
- * PatternStream<IN> pattern = ...
+ * // 定义一个模式匹配流
+ * PatternStream<Event> patternStream = ...
  *
- * DataStream<OUT> result = pattern.process(new MyPatternProcessFunction());
+ * // 处理匹配到的模式
+ * DataStream<Result> resultStream = patternStream.process(new MyPatternProcessFunction());
  * }</pre>
  *
- * @param <IN> type of incoming elements
- * @param <OUT> type of produced elements based on found matches
+ * @param <IN>  输入数据类型，即流中原始事件类型
+ * @param <OUT> 输出数据类型，即匹配后生成的结果类型
  */
 @PublicEvolving
 public abstract class PatternProcessFunction<IN, OUT> extends AbstractRichFunction {
 
     /**
-     * Generates resulting elements given a map of detected pattern events. The events are
-     * identified by their specified names.
+     * 处理匹配成功的事件，并生成输出数据。
      *
-     * <p>{@link PatternProcessFunction.Context#timestamp()} in this case returns the time of the
-     * last element that was assigned to the match, resulting in this partial match being finished.
+     * <p>当 `CEP` 匹配到模式后，会调用 `processMatch` 方法，并将匹配到的事件传递进来。
+     * 这些事件以 `Map<String, List<IN>>` 的形式存储，键为模式中的事件名称，值为匹配的事件列表。
      *
-     * @param match map containing the found pattern. Events are identified by their names.
-     * @param ctx enables access to time features and emitting results through side outputs
-     * @param out Collector used to output the generated elements
-     * @throws Exception This method may throw exceptions. Throwing an exception will cause the
-     *     operation to fail and may trigger recovery.
+     * <p>**时间相关信息:**
+     * - `Context.timestamp()` 返回的是 **最后一个匹配到的事件的时间戳**，即导致该匹配成功的事件时间。
+     * - 可以使用 `ctx.output()` 将数据发送到侧输出流。
+     *
+     * <p>**示例代码:**
+     * <pre>{@code
+     * public class MyPatternProcessFunction extends PatternProcessFunction<Event, String> {
+     *     @Override
+     *     public void processMatch(Map<String, List<Event>> match, Context ctx, Collector<String> out) {
+     *         Event startEvent = match.get("start").get(0);
+     *         Event endEvent = match.get("end").get(0);
+     *         out.collect("Detected Pattern: " + startEvent + " -> " + endEvent);
+     *     }
+     * }
+     * }</pre>
+     *
+     * @param match 匹配的事件集合，键是模式中定义的事件名称，值是匹配到的事件列表
+     * @param ctx 上下文对象，提供时间信息和侧输出功能
+     * @param out 结果收集器，用于向主流输出匹配的结果
+     * @throws Exception 可能会抛出异常，抛出异常会导致任务失败，并可能触发恢复机制
      */
     public abstract void processMatch(
             final Map<String, List<IN>> match, final Context ctx, final Collector<OUT> out)
             throws Exception;
 
     /**
-     * Gives access to time related characteristics as well as enables emitting elements to side
-     * outputs.
+     * `Context` 接口提供了时间相关信息，并支持将数据发送到侧输出流。
      */
     public interface Context extends TimeContext {
+
         /**
-         * Emits a record to the side output identified by the {@link OutputTag}.
+         * 发送数据到指定的侧输出流 (Side Output)。
          *
-         * @param outputTag the {@code OutputTag} that identifies the side output to emit to.
-         * @param value The record to emit.
+         * <p>可以使用 `OutputTag<X>` 标识侧输出流，并通过 `context.output()` 将数据发送到该流。
+         * 这在处理迟到数据或需要分流不同类型数据时非常有用。
+         *
+         * <p>**示例代码:**
+         * <pre>{@code
+         * OutputTag<Event> lateDataTag = new OutputTag<Event>("late-data"){};
+         *
+         * public class MyPatternProcessFunction extends PatternProcessFunction<Event, String> {
+         *     @Override
+         *     public void processMatch(Map<String, List<Event>> match, Context ctx, Collector<String> out) {
+         *         Event event = match.get("start").get(0);
+         *         if (event.isLate()) {
+         *             ctx.output(lateDataTag, event);
+         *         } else {
+         *             out.collect("Matched: " + event);
+         *         }
+         *     }
+         * }
+         * }</pre>
+         *
+         * @param outputTag 侧输出流的 `OutputTag` 标识符
+         * @param value 需要发送到侧输出流的值
+         * @param <X> 侧输出流的数据类型
          */
         <X> void output(final OutputTag<X> outputTag, final X value);
     }
 }
+

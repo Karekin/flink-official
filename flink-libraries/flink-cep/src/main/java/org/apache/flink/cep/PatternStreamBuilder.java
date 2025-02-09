@@ -41,37 +41,61 @@ import java.util.Map;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
-/** Utility method for creating {@link PatternStream}. */
+/**
+ * {@link PatternStreamBuilder} 是一个用于构建 `PatternStream` 的工具类。
+ *
+ * <p>它负责：
+ * - 绑定输入流 (`DataStream<IN>`) 和匹配模式 (`Pattern<IN, ?>`)。
+ * - 设定时间行为 (`ProcessingTime` 或 `EventTime`)。
+ * - 设定事件比较器 (`EventComparator`)，用于事件排序。
+ * - 设定迟到数据的侧输出流 (`lateDataOutputTag`)。
+ * - 通过 `build()` 方法创建 `SingleOutputStreamOperator<OUT>`，用于处理匹配模式。
+ *
+ * @param <IN> 输入流中的数据类型
+ */
 @Internal
 final class PatternStreamBuilder<IN> {
 
+    /** Flink 输入数据流 */
     private final DataStream<IN> inputStream;
 
+    /** 要匹配的模式 */
     private final Pattern<IN, ?> pattern;
 
+    /** 事件比较器（用于排序），可选 */
     private final EventComparator<IN> comparator;
 
     /**
-     * Side output {@code OutputTag} for late data. If no tag is set late data will be simply
-     * dropped.
+     * 侧输出流 `OutputTag`，用于存储迟到数据。
+     * 如果未设置，则迟到数据将被丢弃。
      */
     private final OutputTag<IN> lateDataOutputTag;
 
     /**
-     * The time behaviour to specify processing time or event time. Default time behaviour is {@link
-     * TimeBehaviour#EventTime}.
+     * 时间行为（Processing Time 或 Event Time）。
+     * 默认为 `EventTime`。
      */
     private final TimeBehaviour timeBehaviour;
 
     /**
-     * The time behaviour enum defines how the system determines time for time-dependent order and
-     * operations that depend on time.
+     * 时间行为枚举类，定义了 Flink CEP 处理模式的时间类型：
+     * - `ProcessingTime`：基于处理时间
+     * - `EventTime`：基于事件时间
      */
     enum TimeBehaviour {
         ProcessingTime,
         EventTime
     }
 
+    /**
+     * 构造 `PatternStreamBuilder`，绑定数据流、模式、时间行为等参数。
+     *
+     * @param inputStream  输入数据流
+     * @param pattern      需要匹配的 `Pattern`
+     * @param timeBehaviour  时间行为 (`ProcessingTime` 或 `EventTime`)
+     * @param comparator   事件比较器 (可选)
+     * @param lateDataOutputTag  侧输出流 `OutputTag` (可选)
+     */
     private PatternStreamBuilder(
             final DataStream<IN> inputStream,
             final Pattern<IN, ?> pattern,
@@ -85,50 +109,76 @@ final class PatternStreamBuilder<IN> {
         this.lateDataOutputTag = lateDataOutputTag;
     }
 
+    /**
+     * 获取输入流的 `TypeInformation`。
+     *
+     * @return 输入流的类型信息
+     */
     TypeInformation<IN> getInputType() {
         return inputStream.getType();
     }
 
     /**
-     * Invokes the {@link org.apache.flink.api.java.ClosureCleaner} on the given function if closure
-     * cleaning is enabled in the {@link ExecutionConfig}.
+     * 在 `ExecutionConfig` 启用了闭包清理时，对给定的函数进行闭包清理。
      *
-     * @return The cleaned Function
+     * @param f 需要清理的函数
+     * @param <F> 函数类型
+     * @return 清理后的函数
      */
     <F> F clean(F f) {
         return inputStream.getExecutionEnvironment().clean(f);
     }
 
+    /**
+     * 设置事件比较器 (EventComparator)，返回新的 `PatternStreamBuilder`。
+     *
+     * @param comparator 事件比较器
+     * @return 配置了 `comparator` 的 `PatternStreamBuilder`
+     */
     PatternStreamBuilder<IN> withComparator(final EventComparator<IN> comparator) {
         return new PatternStreamBuilder<>(
                 inputStream, pattern, timeBehaviour, checkNotNull(comparator), lateDataOutputTag);
     }
 
+    /**
+     * 设置侧输出流 `OutputTag`，用于存储迟到数据，返回新的 `PatternStreamBuilder`。
+     *
+     * @param lateDataOutputTag 侧输出流 `OutputTag`
+     * @return 配置了 `lateDataOutputTag` 的 `PatternStreamBuilder`
+     */
     PatternStreamBuilder<IN> withLateDataOutputTag(final OutputTag<IN> lateDataOutputTag) {
         return new PatternStreamBuilder<>(
                 inputStream, pattern, timeBehaviour, comparator, checkNotNull(lateDataOutputTag));
     }
 
+    /**
+     * 将时间行为设置为 `ProcessingTime`，返回新的 `PatternStreamBuilder`。
+     *
+     * @return 配置了 `ProcessingTime` 的 `PatternStreamBuilder`
+     */
     PatternStreamBuilder<IN> inProcessingTime() {
         return new PatternStreamBuilder<>(
                 inputStream, pattern, TimeBehaviour.ProcessingTime, comparator, lateDataOutputTag);
     }
 
+    /**
+     * 将时间行为设置为 `EventTime`，返回新的 `PatternStreamBuilder`。
+     *
+     * @return 配置了 `EventTime` 的 `PatternStreamBuilder`
+     */
     PatternStreamBuilder<IN> inEventTime() {
         return new PatternStreamBuilder<>(
                 inputStream, pattern, TimeBehaviour.EventTime, comparator, lateDataOutputTag);
     }
 
     /**
-     * Creates a data stream containing results of {@link PatternProcessFunction} to fully matching
-     * event patterns.
+     * 构建 `SingleOutputStreamOperator`，用于处理匹配的事件序列。
      *
-     * @param processFunction function to be applied to matching event sequences
-     * @param outTypeInfo output TypeInformation of {@link PatternProcessFunction#processMatch(Map,
-     *     PatternProcessFunction.Context, Collector)}
-     * @param <OUT> type of output events
-     * @return Data stream containing fully matched event sequence with applied {@link
-     *     PatternProcessFunction}
+     * @param outTypeInfo    输出数据类型信息
+     * @param processFunction  处理匹配模式的 `PatternProcessFunction`
+     * @param <OUT>  输出数据类型
+     * @param <K>    Keyed Stream 的 Key 类型
+     * @return `SingleOutputStreamOperator<OUT>`，用于处理匹配的事件序列
      */
     <OUT, K> SingleOutputStreamOperator<OUT> build(
             final TypeInformation<OUT> outTypeInfo,
@@ -137,16 +187,23 @@ final class PatternStreamBuilder<IN> {
         checkNotNull(outTypeInfo);
         checkNotNull(processFunction);
 
+        // 获取输入数据的序列化器
         final TypeSerializer<IN> inputSerializer =
                 inputStream
                         .getType()
                         .createSerializer(inputStream.getExecutionConfig().getSerializerConfig());
+
+        // 判断是否使用 Processing Time
         final boolean isProcessingTime = timeBehaviour == TimeBehaviour.ProcessingTime;
 
+        // 是否需要超时处理
         final boolean timeoutHandling = processFunction instanceof TimedOutPartialMatchHandler;
+
+        // 通过 NFA 编译器构建 NFA
         final NFACompiler.NFAFactory<IN> nfaFactory =
                 NFACompiler.compileFactory(pattern, timeoutHandling);
 
+        // 构建 `CepOperator`
         final CepOperator<IN, K, OUT> operator =
                 new CepOperator<>(
                         inputSerializer,
@@ -158,13 +215,14 @@ final class PatternStreamBuilder<IN> {
                         lateDataOutputTag);
 
         final SingleOutputStreamOperator<OUT> patternStream;
+
+        // 判断是否是 KeyedStream
         if (inputStream instanceof KeyedStream) {
             KeyedStream<IN, K> keyedStream = (KeyedStream<IN, K>) inputStream;
-
             patternStream = keyedStream.transform("CepOperator", outTypeInfo, operator);
         } else {
+            // 使用 `NullByteKeySelector` 进行 keyBy 操作
             KeySelector<IN, Byte> keySelector = new NullByteKeySelector<>();
-
             patternStream =
                     inputStream
                             .keyBy(keySelector)
@@ -175,12 +233,20 @@ final class PatternStreamBuilder<IN> {
         return patternStream;
     }
 
-    // ---------------------------------------- factory-like methods
-    // ---------------------------------------- //
+    // ---------------------------------------- 工厂方法 ---------------------------------------- //
 
+    /**
+     * 创建 `PatternStreamBuilder` 实例，绑定输入流和模式，默认使用 `EventTime`。
+     *
+     * @param inputStream  输入数据流
+     * @param pattern  匹配模式
+     * @param <IN>  数据类型
+     * @return `PatternStreamBuilder<IN>` 实例
+     */
     static <IN> PatternStreamBuilder<IN> forStreamAndPattern(
             final DataStream<IN> inputStream, final Pattern<IN, ?> pattern) {
         return new PatternStreamBuilder<>(
                 inputStream, pattern, TimeBehaviour.EventTime, null, null);
     }
 }
+
