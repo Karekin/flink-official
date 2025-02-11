@@ -72,191 +72,205 @@ import java.util.Optional;
 import static org.apache.flink.util.Preconditions.checkState;
 
 /**
- * Base class for all stream operators. Operators that contain a user function should extend the
- * class {@link AbstractUdfStreamOperator} instead (which is a specialized subclass of this class).
+ * 所有流运算符的基类。包含用户函数的运算符应扩展 {@link AbstractUdfStreamOperator}（它是该类的专门子类）。
  *
- * <p>For concrete implementations, one of the following two interfaces must also be implemented, to
- * mark the operator as unary or binary: {@link OneInputStreamOperator} or {@link
- * TwoInputStreamOperator}.
+ * <p>具体实现类必须同时实现以下两个接口之一，以标记运算符是单输入（unary）还是双输入（binary）：
+ * {@link OneInputStreamOperator} 或 {@link TwoInputStreamOperator}。
  *
- * <p>Methods of {@code StreamOperator} are guaranteed not to be called concurrently. Also, if using
- * the timer service, timer callbacks are also guaranteed not to be called concurrently with methods
- * on {@code StreamOperator}.
+ * <p>{@code StreamOperator} 的方法保证不会被并发调用。此外，如果使用定时器服务，
+ * 定时器回调也保证不会与 {@code StreamOperator} 上的方法并发调用。
  *
- * <p>Note, this class is going to be removed and replaced in the future by {@link
- * AbstractStreamOperatorV2}. However as {@link AbstractStreamOperatorV2} is currently experimental,
- * {@link AbstractStreamOperator} has not been deprecated just yet.
+ * <p>请注意，本类未来将被 {@link AbstractStreamOperatorV2} 取代。
+ * 但由于 {@link AbstractStreamOperatorV2} 目前仍是实验性的，因此 {@link AbstractStreamOperator} 仍未被标记为废弃。
  *
- * @param <OUT> The output type of the operator.
+ * @param <OUT> 运算符的输出类型。
  */
-
-/**
-  * @授课老师(V): yi_locus
-  * email: 156184212@qq.com
-  * 所有流运算符的基类。包含用户函数的运算符应扩展
-  */
 @PublicEvolving
 public abstract class AbstractStreamOperator<OUT>
         implements StreamOperator<OUT>,
-                SetupableStreamOperator<OUT>,
-                CheckpointedStreamOperator,
-                KeyContextHandler,
-                Serializable {
+        SetupableStreamOperator<OUT>,
+        CheckpointedStreamOperator,
+        KeyContextHandler,
+        Serializable {
     private static final long serialVersionUID = 1L;
 
-    /** The logger used by the operator class and its subclasses. */
+    /** 当前运算符类及其子类使用的日志记录器。 */
     protected static final Logger LOG = LoggerFactory.getLogger(AbstractStreamOperator.class);
 
-    // ----------- configuration properties -------------
+    // ----------- 配置属性 -------------
 
-    // A sane default for most operators
     /**
-     * 用于指定上下游算子的链接策略
+     * 用于指定当前运算符与上下游算子的链接策略（默认是HEAD策略）。
+     * HEAD 表示该运算符不会与前一个运算符链在一起，而是独立运行。
      */
     protected ChainingStrategy chainingStrategy = ChainingStrategy.HEAD;
 
-    // ---------------- runtime fields ------------------
+    // ---------------- 运行时字段 ------------------
 
-    /** The task that contains this operator (and other operators in the same chain). */
     /**
-     * 当前Operator所属的StreamTask，最终StreamTask中的invoke方法执行当前StreamTask中所有的Operator
+     * 包含当前运算符的 StreamTask（以及同一链中的其他运算符）。
+     * StreamTask 负责管理运算符的生命周期和执行过程。
      */
     private transient StreamTask<?, ?> container;
 
+    /** StreamTask 解析 JobGraph 任务配置信息后封装的 StreamConfig 对象。 */
     protected transient StreamConfig config;
+
     /**
-     * 定义了当前StreamOperator输出操作，执行完算子的转换后，会通过output组件将数据写入到下游
+     * 当前 StreamOperator 的输出组件。
+     * 该组件用于在运算符执行完转换逻辑后，将数据写入下游算子。
      */
     protected transient Output<StreamRecord<OUT>> output;
 
+    /** 维护输入水位线状态的组件，处理水印的传播。 */
     private transient IndexedCombinedWatermarkStatus combinedWatermark;
 
-    /** The runtime context for UDFs. */
     /**
-     * 获取上下文信息，累加器、状态数据
+     * UDF（用户自定义函数）的运行时上下文。
+     * 主要用于获取任务信息、累加器和状态数据。
      */
     private transient StreamingRuntimeContext runtimeContext;
 
-    // ---------------- key/value state ------------------
+    // ---------------- 键/值状态 ------------------
 
     /**
-     * {@code KeySelector} for extracting a key from an element being processed. This is used to
-     * scope keyed state to a key. This is null if the operator is not a keyed operator.
+     * 用于从输入元素中提取 Key 的 KeySelector。
+     * 该 KeySelector 用于对 Keyed State 进行作用域限定。
+     * 如果运算符不是 Keyed 类型，则此字段为 null。
      *
-     * <p>This is for elements from the first input.
+     * 适用于第一输入流的 KeySelector。
      */
     private transient KeySelector<?, ?> stateKeySelector1;
 
     /**
-     * {@code KeySelector} for extracting a key from an element being processed. This is used to
-     * scope keyed state to a key. This is null if the operator is not a keyed operator.
-     *
-     * <p>This is for elements from the second input.
+     * 用于第二输入流的 KeySelector（仅适用于双输入算子）。
      */
     private transient KeySelector<?, ?> stateKeySelector2;
 
+    /** 处理流运算符的状态管理，包括 Checkpoint 机制的集成。 */
     private transient StreamOperatorStateHandler stateHandler;
 
+    /** 内部时间服务管理器，用于管理定时器的注册与触发。 */
     private transient InternalTimeServiceManager<?> timeServiceManager;
 
-    // --------------- Metrics ---------------------------
+    // --------------- 监控指标 ---------------------------
 
-    /** Metric group for the operator. */
+    /** 该运算符的度量指标组。 */
     protected transient InternalOperatorMetricGroup metrics;
 
+    /** 计算数据处理的延迟统计信息。 */
     protected transient LatencyStats latencyStats;
 
-    // ---------------- time handler ------------------
+    // ---------------- 时间处理 ------------------
 
+    /** 处理时间服务组件，负责触发定时任务（如定时器回调）。 */
     protected transient ProcessingTimeService processingTimeService;
 
+    /** 记录第一输入流的最后一条记录的属性。 */
     protected transient RecordAttributes lastRecordAttributes1 =
             RecordAttributes.EMPTY_RECORD_ATTRIBUTES;
+
+    /** 记录第二输入流的最后一条记录的属性（仅适用于双输入算子）。 */
     protected transient RecordAttributes lastRecordAttributes2 =
             RecordAttributes.EMPTY_RECORD_ATTRIBUTES;
 
     // ------------------------------------------------------------------------
-    //  Life Cycle
+    //  生命周期管理
     // ------------------------------------------------------------------------
 
     @Override
     public void setup(
-            StreamTask<?, ?> containingTask,
-            StreamConfig config,
-            Output<StreamRecord<OUT>> output) {
+            StreamTask<?, ?> containingTask,  // 关联的流任务（StreamTask）
+            StreamConfig config,  // 操作符的配置信息
+            Output<StreamRecord<OUT>> output) {  // 输出数据流
+
+        // 获取 StreamTask 的执行环境（Environment）
         final Environment environment = containingTask.getEnvironment();
+
+        // 赋值当前任务容器
         this.container = containingTask;
         this.config = config;
         this.output = output;
-        this.metrics =
-                environment
-                        .getMetricGroup()
-                        .getOrAddOperator(config.getOperatorID(), config.getOperatorName());
+
+        // 获取操作符的度量指标组（Metrics）
+        this.metrics = environment
+                .getMetricGroup()
+                .getOrAddOperator(config.getOperatorID(), config.getOperatorName());
+
+        // 初始化水位线状态管理，假设该算子有两个输入
         this.combinedWatermark = IndexedCombinedWatermarkStatus.forInputsCount(2);
 
         try {
+            // 获取 TaskManager 级别的配置
             Configuration taskManagerConfig = environment.getTaskManagerInfo().getConfiguration();
+
+            // 获取历史延迟指标的最大记录数
             int historySize = taskManagerConfig.get(MetricOptions.LATENCY_HISTORY_SIZE);
             if (historySize <= 0) {
                 LOG.warn(
-                        "{} has been set to a value equal or below 0: {}. Using default.",
+                        "{} 配置值为 {}，小于等于 0，使用默认值。",
                         MetricOptions.LATENCY_HISTORY_SIZE,
                         historySize);
                 historySize = MetricOptions.LATENCY_HISTORY_SIZE.defaultValue();
             }
 
+            // 解析延迟统计的粒度（granularity）
             final String configuredGranularity =
                     taskManagerConfig.get(MetricOptions.LATENCY_SOURCE_GRANULARITY);
             LatencyStats.Granularity granularity;
             try {
-                granularity =
-                        LatencyStats.Granularity.valueOf(
-                                configuredGranularity.toUpperCase(Locale.ROOT));
+                // 解析字符串为 LatencyStats.Granularity 枚举值
+                granularity = LatencyStats.Granularity.valueOf(configuredGranularity.toUpperCase(Locale.ROOT));
             } catch (IllegalArgumentException iae) {
+                // 如果解析失败，默认使用 OPERATOR 级别的统计粒度
                 granularity = LatencyStats.Granularity.OPERATOR;
                 LOG.warn(
-                        "Configured value {} option for {} is invalid. Defaulting to {}.",
-                        configuredGranularity,
+                        "配置的 {} 值 {} 无效，使用默认值 {}。",
                         MetricOptions.LATENCY_SOURCE_GRANULARITY.key(),
+                        configuredGranularity,
                         granularity);
             }
+
+            // 获取当前作业（Job）的度量组
             MetricGroup jobMetricGroup = this.metrics.getJobMetricGroup();
-            this.latencyStats =
-                    new LatencyStats(
-                            jobMetricGroup.addGroup("latency"),
-                            historySize,
-                            container.getIndexInSubtaskGroup(),
-                            getOperatorID(),
-                            granularity);
+
+            // 初始化延迟统计对象
+            this.latencyStats = new LatencyStats(
+                    jobMetricGroup.addGroup("latency"),
+                    historySize,
+                    container.getIndexInSubtaskGroup(),
+                    getOperatorID(),
+                    granularity);
         } catch (Exception e) {
-            LOG.warn("An error occurred while instantiating latency metrics.", e);
-            this.latencyStats =
-                    new LatencyStats(
-                            UnregisteredMetricGroups.createUnregisteredTaskManagerJobMetricGroup()
-                                    .addGroup("latency"),
-                            1,
-                            0,
-                            new OperatorID(),
-                            LatencyStats.Granularity.SINGLE);
+            LOG.warn("初始化延迟度量指标时发生异常。", e);
+
+            // 在异常情况下，使用默认的延迟统计配置
+            this.latencyStats = new LatencyStats(
+                    UnregisteredMetricGroups.createUnregisteredTaskManagerJobMetricGroup()
+                            .addGroup("latency"),
+                    1,
+                    0,
+                    new OperatorID(),
+                    LatencyStats.Granularity.SINGLE);
         }
 
-        this.runtimeContext =
-                new StreamingRuntimeContext(
-                        environment,
-                        environment.getAccumulatorRegistry().getUserMap(),
-                        getMetricGroup(),
-                        getOperatorID(),
-                        getProcessingTimeService(),
-                        null,
-                        environment.getExternalResourceInfoProvider());
+        // 初始化运行时上下文
+        this.runtimeContext = new StreamingRuntimeContext(
+                environment,
+                environment.getAccumulatorRegistry().getUserMap(), // 获取累加器（Accumulators）
+                getMetricGroup(),
+                getOperatorID(),
+                getProcessingTimeService(),
+                null,  // 这里可以传入 OperatorStateStore
+                environment.getExternalResourceInfoProvider());
 
+        // 获取 Keyed State 的分区器（State KeySelector）
         stateKeySelector1 = config.getStatePartitioner(0, getUserCodeClassloader());
         stateKeySelector2 = config.getStatePartitioner(1, getUserCodeClassloader());
     }
 
     /**
-     * @deprecated The {@link ProcessingTimeService} instance should be passed by the operator
-     *     constructor and this method will be removed along with {@link SetupableStreamOperator}.
+     * @deprecated 该方法已被弃用，建议在算子构造函数中直接传入 {@link ProcessingTimeService}。
      */
     @Deprecated
     public void setProcessingTimeService(ProcessingTimeService processingTimeService) {
@@ -269,68 +283,72 @@ public abstract class AbstractStreamOperator<OUT>
     }
 
     /**
-     * @授课老师(微信): yi_locus
-     * email: 156184212@qq.com
-     * 初始化StreamOperator所有状态
-    */
+     * 初始化 StreamOperator 的所有状态（State）
+     */
     @Override
     public final void initializeState(StreamTaskStateInitializer streamTaskStateManager)
             throws Exception {
-        // 获取状态键的序列化器
-        final TypeSerializer<?> keySerializer =
-                config.getStateKeySerializer(getUserCodeClassloader());
-        // 获取包含此操作的StreamTask对象，并进行非空检查
+
+        // 获取状态键的序列化器（State Key Serializer）
+        final TypeSerializer<?> keySerializer = config.getStateKeySerializer(getUserCodeClassloader());
+
+        // 获取包含该操作的 StreamTask 实例，并进行非空检查
         final StreamTask<?, ?> containingTask = Preconditions.checkNotNull(getContainingTask());
-        // 获取可关闭资源的注册器，并进行非空检查
+
+        // 获取可关闭资源的注册器（CloseableRegistry），用于管理可关闭资源
         final CloseableRegistry streamTaskCloseableRegistry =
                 Preconditions.checkNotNull(containingTask.getCancelables());
-        // 创建一个StreamOperatorStateContext对象，它包含了StateBackend所需的所有上下文信息
+
+        // 创建 StreamOperatorStateContext，用于管理操作符状态的上下文信息
         final StreamOperatorStateContext context =
                 streamTaskStateManager.streamOperatorStateContext(
-                        getOperatorID(), // 操作符的ID
-                        getClass().getSimpleName(),// 操作符的简单类名
-                        getProcessingTimeService(),// 处理时间服务
-                        this,// 当前操作符的实例
+                        getOperatorID(), // 操作符 ID
+                        getClass().getSimpleName(), // 操作符的类名
+                        getProcessingTimeService(), // 处理时间服务
+                        this, // 当前操作符实例
                         keySerializer, // 状态键的序列化器
-                        streamTaskCloseableRegistry,// 可关闭资源的注册器
-                        metrics,// 相关的度量指标
-                        // 获取用于状态后端的托管内存比例
+                        streamTaskCloseableRegistry, // 可关闭资源管理器
+                        metrics, // 关联的度量指标
+                        // 获取当前操作符在 Slot 级别的托管内存比例
                         config.getManagedMemoryFractionOperatorUseCaseOfSlot(
                                 ManagedMemoryUseCase.STATE_BACKEND,
                                 runtimeContext.getJobConfiguration(),
                                 runtimeContext.getTaskManagerRuntimeInfo().getConfiguration(),
                                 runtimeContext.getUserCodeClassLoader()),
-                        isUsingCustomRawKeyedState());
-        // 创建一个StreamOperatorStateHandler对象，用于管理操作符的状态
-        stateHandler =
-                new StreamOperatorStateHandler(
-                        context, getExecutionConfig(), streamTaskCloseableRegistry);
-        // 获取内部时间服务管理器
+                        isUsingCustomRawKeyedState()); // 是否使用自定义原始 KeyedState
+
+        // 创建 StreamOperatorStateHandler 进行状态管理
+        stateHandler = new StreamOperatorStateHandler(
+                context, getExecutionConfig(), streamTaskCloseableRegistry);
+
+        // 获取内部时间服务管理器（InternalTimerServiceManager）
         timeServiceManager = context.internalTimerServiceManager();
-        // 初始化操作符的状态
+
+        // 初始化操作符状态
         stateHandler.initializeOperatorState(this);
-        // 设置KeyedStateStore到运行时上下文中，如果stateHandler没有则返回null
+
+        // 如果 stateHandler 存在 KeyedStateStore，则设置到运行时上下文中，否则设置为 null
         runtimeContext.setKeyedStateStore(stateHandler.getKeyedStateStore().orElse(null));
     }
 
+
     /**
-     * Indicates whether or not implementations of this class is writing to the raw keyed state
-     * streams on snapshots, using {@link #snapshotState(StateSnapshotContext)}. If yes, subclasses
-     * should override this method to return {@code true}.
+     * 指示该算子是否在进行快照时写入原始的 Keyed State 数据流。
      *
-     * <p>Subclasses need to explicitly indicate the use of raw keyed state because, internally, the
-     * {@link AbstractStreamOperator} may attempt to read from it as well to restore heap-based
-     * timers and ultimately fail with read errors. By setting this flag to {@code true}, this
-     * allows the {@link AbstractStreamOperator} to know that the data written in the raw keyed
-     * states were not written by the timer services, and skips the timer restore attempt.
+     * <p>如果子类需要写入原始的 Keyed State 数据流，应当重写该方法并返回 {@code true}。
      *
-     * <p>Please refer to FLINK-19741 for further details.
+     * <p>子类需要显式声明是否使用原始的 Keyed State，因为 `AbstractStreamOperator`
+     * 在恢复时可能会尝试从中读取 Heap-Based Timers（基于堆的定时器），
+     * 如果这些数据不是定时器服务写入的，可能会导致读取失败。
      *
-     * <p>TODO: this method can be removed once all timers are moved to be managed by state
-     * backends.
+     * <p>通过设置该标志为 `true`，可以让 `AbstractStreamOperator` 知道原始的 Keyed State
+     * 数据不是定时器服务写入的，从而跳过定时器的恢复。
      *
-     * @return flag indicating whether or not this operator is writing to raw keyed state via {@link
-     *     #snapshotState(StateSnapshotContext)}.
+     * <p>参考 FLINK-19741 了解更多细节。
+     *
+     * <p>TODO: 当所有定时器都迁移到 StateBackend 管理后，该方法可以被移除。
+     *
+     * @return 是否使用了自定义的 Keyed State
      */
     @Internal
     protected boolean isUsingCustomRawKeyedState() {
@@ -338,19 +356,32 @@ public abstract class AbstractStreamOperator<OUT>
     }
 
     /**
-     * This method is called immediately before any elements are processed, it should contain the
-     * operator's initialization logic, e.g. state initialization.
+     * `open()` 方法会在算子开始处理元素之前被调用，可用于初始化逻辑（如状态初始化）。
      *
-     * <p>The default implementation does nothing.
+     * <p>默认实现为空方法，子类可以重写该方法进行初始化操作。
      *
-     * @throws Exception An exception in this method causes the operator to fail.
+     * @throws Exception 如果发生异常，会导致算子启动失败。
      */
     @Override
     public void open() throws Exception {}
 
+    /**
+     * `finish()` 方法会在算子完成所有数据处理后被调用，表示算子即将终止。
+     *
+     * <p>默认实现为空方法，子类可以重写该方法来执行终止前的操作，例如刷新数据。
+     *
+     * @throws Exception 如果发生异常，会导致算子执行失败。
+     */
     @Override
     public void finish() throws Exception {}
 
+    /**
+     * `close()` 方法在算子生命周期结束时调用，用于释放资源。
+     *
+     * <p>这里主要用于清理 `stateHandler`，防止资源泄漏。
+     *
+     * @throws Exception 如果关闭过程中出现异常，会记录日志但不会影响任务结束。
+     */
     @Override
     public void close() throws Exception {
         if (stateHandler != null) {
@@ -358,24 +389,29 @@ public abstract class AbstractStreamOperator<OUT>
         }
     }
 
+    /**
+     * 在检查点快照创建之前调用。
+     *
+     * <p>默认实现为空方法，子类可以重写该方法以在检查点前执行特定操作。
+     *
+     * @param checkpointId 进行中的检查点 ID
+     * @throws Exception 如果发生异常，会导致任务失败。
+     */
     @Override
     public void prepareSnapshotPreBarrier(long checkpointId) throws Exception {
-        // the default implementation does nothing and accepts the checkpoint
-        // this is purely for subclasses to override
+        // 默认实现不执行任何操作，仅供子类重写
     }
 
     /**
-     * @授课老师(微信): yi_locus
-     * email: 156184212@qq.com
-     * 对当前操作符进行状态快照。
+     * 对当前算子进行状态快照，并将其持久化到外部存储（如 RocksDB）。
      *
-     * @param checkpointId        检查点的唯一标识符。
-     * @param timestamp           检查点的时间戳。
-     * @param checkpointOptions   检查点选项，包含了关于检查点的配置信息。
-     * @param factory             用于创建检查点流的工厂。
-     * @return                    返回一个OperatorSnapshotFutures对象，用于追踪快照操作的状态和结果。
-     * @throws Exception          如果快照过程中发生异常，则抛出该异常。
-    */
+     * @param checkpointId        检查点的唯一标识符
+     * @param timestamp           检查点的时间戳
+     * @param checkpointOptions   检查点的选项配置，定义了快照类型（如同步或异步）
+     * @param factory             用于创建检查点流的工厂
+     * @return                    返回 `OperatorSnapshotFutures`，用于跟踪快照状态和结果
+     * @throws Exception          如果发生异常，会导致检查点失败
+     */
     @Override
     public final OperatorSnapshotFutures snapshotState(
             long checkpointId,
@@ -384,75 +420,115 @@ public abstract class AbstractStreamOperator<OUT>
             CheckpointStreamFactory factory)
             throws Exception {
         return stateHandler.snapshotState(
-                this,// 当前操作符实例
-                Optional.ofNullable(timeServiceManager),// 时间服务管理器，如果存在则包装为Optional，否则为null
-                getOperatorName(),// 获取当前操作符的名称
-                checkpointId,// 检查点ID
-                timestamp,// 时间戳
-                checkpointOptions,// 检查点选项
-                factory,// 检查点流工厂
-                isUsingCustomRawKeyedState());// 是否使用了自定义的原始键控状态
+                this,  // 当前算子实例
+                Optional.ofNullable(timeServiceManager),  // 时间服务管理器（如果存在）
+                getOperatorName(),  // 获取算子名称
+                checkpointId,  // 检查点 ID
+                timestamp,  // 时间戳
+                checkpointOptions,  // 检查点配置选项
+                factory,  // 检查点数据流工厂
+                isUsingCustomRawKeyedState());  // 是否使用了自定义的 Keyed State
     }
 
     /**
-     * Stream operators with state, which want to participate in a snapshot need to override this
-     * hook method.
+     * 如果算子有状态，并且希望参与检查点快照，则需要重写该方法。
      *
-     * @param context context that provides information and means required for taking a snapshot
+     * @param context 提供创建检查点快照所需的上下文信息
+     * @throws Exception 如果发生异常，会导致检查点失败。
      */
     @Override
     public void snapshotState(StateSnapshotContext context) throws Exception {}
 
     /**
-     * Stream operators with state which can be restored need to override this hook method.
+     * 如果算子有状态，并且需要支持状态恢复，则需要重写该方法。
      *
-     * @param context context that allows to register different states.
+     * @param context 允许注册不同类型状态的上下文
+     * @throws Exception 如果状态恢复失败，会导致任务失败。
      */
     @Override
     public void initializeState(StateInitializationContext context) throws Exception {}
 
+    /**
+     * 当检查点完成时会被回调，通知算子检查点已经成功。
+     *
+     * <p>此方法会调用 `stateHandler` 处理检查点完成的逻辑。
+     *
+     * @param checkpointId 已完成的检查点 ID
+     * @throws Exception 如果处理过程中发生异常，可能会导致任务失败。
+     */
     @Override
     public void notifyCheckpointComplete(long checkpointId) throws Exception {
         stateHandler.notifyCheckpointComplete(checkpointId);
     }
 
+    /**
+     * 当检查点被中止时会被回调，通知算子检查点失败。
+     *
+     * <p>此方法会调用 `stateHandler` 处理检查点中止的逻辑。
+     *
+     * @param checkpointId 被中止的检查点 ID
+     * @throws Exception 如果处理过程中发生异常，可能会导致任务失败。
+     */
     @Override
     public void notifyCheckpointAborted(long checkpointId) throws Exception {
         stateHandler.notifyCheckpointAborted(checkpointId);
     }
 
+
     // ------------------------------------------------------------------------
-    //  Properties and Services
-    // ------------------------------------------------------------------------
+//  算子属性（Properties）和服务（Services）
+// ------------------------------------------------------------------------
 
     /**
-     * Gets the execution config defined on the execution environment of the job to which this
-     * operator belongs.
+     * 获取该算子所属作业的执行配置（ExecutionConfig）。
      *
-     * @return The job's execution config.
+     * <p>执行配置包含全局作业设置，例如并行度、序列化方式等。它是 Flink 作业的核心配置信息之一。
+     *
+     * @return 作业的执行配置。
      */
     public ExecutionConfig getExecutionConfig() {
         return container.getExecutionConfig();
     }
 
+    /**
+     * 获取当前算子的流处理配置信息（StreamConfig）。
+     *
+     * @return 算子的 StreamConfig 对象。
+     */
     public StreamConfig getOperatorConfig() {
         return config;
     }
 
+    /**
+     * 获取当前算子所属的 StreamTask（流任务）。
+     *
+     * <p>StreamTask 代表了 Flink 任务的基本执行单元，它包含了任务的生命周期管理、
+     * 状态管理、算子调用等核心逻辑。
+     *
+     * @return 包含此算子的 StreamTask。
+     */
     public StreamTask<?, ?> getContainingTask() {
         return container;
     }
 
+    /**
+     * 获取用户代码（UDF）类加载器。
+     *
+     * <p>Flink 允许用户提供自定义类加载器来加载 UDF（用户自定义函数），以支持动态加载 JAR 依赖。
+     *
+     * @return 用户代码类加载器。
+     */
     public ClassLoader getUserCodeClassloader() {
         return container.getUserCodeClassLoader();
     }
 
     /**
-     * Return the operator name. If the runtime context has been set, then the task name with
-     * subtask index is returned. Otherwise, the simple class name is returned.
+     * 获取算子名称。
      *
-     * @return If runtime context is set, then return task name with subtask index. Otherwise return
-     *     simple class name.
+     * <p>如果运行时上下文（RuntimeContext）已初始化，则返回任务名称（包含子任务索引）。
+     * 否则，返回该算子的简单类名（Simple Class Name）。
+     *
+     * @return 任务名称（包含子任务索引），如果上下文未初始化，则返回类名。
      */
     protected String getOperatorName() {
         if (runtimeContext != null) {
@@ -463,27 +539,51 @@ public abstract class AbstractStreamOperator<OUT>
     }
 
     /**
-     * Returns a context that allows the operator to query information about the execution and also
-     * to interact with systems such as broadcast variables and managed state. This also allows to
-     * register timers.
+     * 获取运行时上下文（RuntimeContext）。
+     *
+     * <p>运行时上下文提供了 Flink 作业的执行信息，例如作业 ID、任务名称、并行度等。
+     * 它还允许操作符与广播变量（Broadcast Variables）和托管状态（Managed State）交互，
+     * 并且可以注册定时器。
+     *
+     * @return StreamingRuntimeContext 对象。
      */
     @VisibleForTesting
     public StreamingRuntimeContext getRuntimeContext() {
         return runtimeContext;
     }
 
+    /**
+     * 获取 Keyed State 后端（KeyedStateBackend）。
+     *
+     * <p>KeyedStateBackend 是 Flink 用于管理 Keyed State（键控状态）的核心组件。
+     * 它支持不同的状态存储后端，如 HeapStateBackend 和 RocksDBStateBackend。
+     *
+     * @return KeyedStateBackend 实例。
+     */
     public <K> KeyedStateBackend<K> getKeyedStateBackend() {
         return stateHandler.getKeyedStateBackend();
     }
 
+    /**
+     * 获取 Operator State 后端（OperatorStateBackend）。
+     *
+     * <p>OperatorStateBackend 用于管理无 Keyed 状态（Operator State）。
+     * 它适用于不需要按键分区的状态，例如 ListState 和 UnionListState。
+     *
+     * @return OperatorStateBackend 实例。
+     */
     @VisibleForTesting
     public OperatorStateBackend getOperatorStateBackend() {
         return stateHandler.getOperatorStateBackend();
     }
 
     /**
-     * Returns the {@link ProcessingTimeService} responsible for getting the current processing time
-     * and registering timers.
+     * 获取当前任务的处理时间服务（ProcessingTimeService）。
+     *
+     * <p>ProcessingTimeService 提供了获取当前处理时间的方法，并允许注册定时器。
+     * 这个组件对实现定时器相关逻辑的操作符（如 `ProcessFunction`）至关重要。
+     *
+     * @return ProcessingTimeService 实例。
      */
     @VisibleForTesting
     public ProcessingTimeService getProcessingTimeService() {
@@ -491,10 +591,16 @@ public abstract class AbstractStreamOperator<OUT>
     }
 
     /**
-     * Creates a partitioned state handle, using the state backend configured for this task.
+     * 获取分区状态（Partitioned State）。
      *
-     * @throws IllegalStateException Thrown, if the key/value state was already initialized.
-     * @throws Exception Thrown, if the state backend cannot create the key/value state.
+     * <p>该方法使用当前任务配置的 StateBackend（状态后端）来创建一个键控状态（Keyed State）。
+     * 如果 Keyed State 还未初始化，则会抛出 `IllegalStateException` 异常。
+     *
+     * @param stateDescriptor 状态描述符，定义状态的名称和序列化方式。
+     * @param <S> 状态类型。
+     * @return 分区状态实例。
+     * @throws IllegalStateException 如果 Keyed State 已初始化，则抛出异常。
+     * @throws Exception 如果状态后端无法创建 Keyed State，则抛出异常。
      */
     protected <S extends State> S getPartitionedState(StateDescriptor<S, ?> stateDescriptor)
             throws Exception {
@@ -502,6 +608,19 @@ public abstract class AbstractStreamOperator<OUT>
                 VoidNamespace.INSTANCE, VoidNamespaceSerializer.INSTANCE, stateDescriptor);
     }
 
+    /**
+     * 获取或创建 Keyed State。
+     *
+     * <p>该方法会检查 Keyed State 是否已经存在，如果不存在，则创建新的 Keyed State。
+     *
+     * @param namespaceSerializer 命名空间的序列化器。
+     * @param stateDescriptor 状态描述符，定义状态的名称和序列化方式。
+     * @param <N> 命名空间类型。
+     * @param <S> 状态类型。
+     * @param <T> 状态存储值的类型。
+     * @return Keyed State 实例。
+     * @throws Exception 如果创建 Keyed State 失败，则抛出异常。
+     */
     protected <N, S extends State, T> S getOrCreateKeyedState(
             TypeSerializer<N> namespaceSerializer, StateDescriptor<S, T> stateDescriptor)
             throws Exception {
@@ -509,10 +628,19 @@ public abstract class AbstractStreamOperator<OUT>
     }
 
     /**
-     * Creates a partitioned state handle, using the state backend configured for this task.
+     * 获取分区状态（Partitioned State）。
      *
-     * @throws IllegalStateException Thrown, if the key/value state was already initialized.
-     * @throws Exception Thrown, if the state backend cannot create the key/value state.
+     * <p>该方法使用当前任务的 StateBackend（状态后端）来创建一个带命名空间的 Keyed State。
+     * 如果 Keyed State 已经初始化，则会抛出 `IllegalStateException` 异常。
+     *
+     * @param namespace 命名空间，指定状态作用范围。
+     * @param namespaceSerializer 命名空间的序列化器。
+     * @param stateDescriptor 状态描述符，定义状态的名称和序列化方式。
+     * @param <S> 状态类型。
+     * @param <N> 命名空间类型。
+     * @return 分区状态实例。
+     * @throws IllegalStateException 如果 Keyed State 已初始化，则抛出异常。
+     * @throws Exception 如果状态后端无法创建 Keyed State，则抛出异常。
      */
     protected <S extends State, N> S getPartitionedState(
             N namespace,
@@ -522,57 +650,113 @@ public abstract class AbstractStreamOperator<OUT>
         return stateHandler.getPartitionedState(namespace, namespaceSerializer, stateDescriptor);
     }
 
+    /**
+     * 设置当前算子的 Keyed Context（第一组）。
+     *
+     * <p>Keyed Context 影响算子状态的作用范围，使算子可以按 Key 访问状态。
+     *
+     * @param record 处理的流数据记录。
+     * @throws Exception 如果设置失败，则抛出异常。
+     */
     @Override
     @SuppressWarnings({"unchecked", "rawtypes"})
     public void setKeyContextElement1(StreamRecord record) throws Exception {
         setKeyContextElement(record, stateKeySelector1);
     }
 
+    /**
+     * 设置当前算子的 Keyed Context（第二组）。
+     *
+     * @param record 处理的流数据记录。
+     * @throws Exception 如果设置失败，则抛出异常。
+     */
     @Override
     @SuppressWarnings({"unchecked", "rawtypes"})
     public void setKeyContextElement2(StreamRecord record) throws Exception {
         setKeyContextElement(record, stateKeySelector2);
     }
 
+    /**
+     * 检查是否有 Keyed Context（第一组）。
+     *
+     * @return 如果 stateKeySelector1 不为空，则返回 true。
+     */
     @Internal
     @Override
     public boolean hasKeyContext1() {
         return stateKeySelector1 != null;
     }
 
+    /**
+     * 检查是否有 Keyed Context（第二组）。
+     *
+     * @return 如果 stateKeySelector2 不为空，则返回 true。
+     */
     @Internal
     @Override
     public boolean hasKeyContext2() {
         return stateKeySelector2 != null;
     }
 
+
+    // ------------------------- 键控状态上下文管理 -------------------------
+
+    /**
+     * 设置当前处理记录的键控上下文
+     * @param record 输入记录（包含值和时间戳）
+     * @param selector 键选择器，用于提取记录键
+     * @param <T> 记录值类型
+     *
+     * 实现机制：
+     * - 通过KeySelector提取记录的业务键
+     * - 将键设置到运行时上下文中，用于后续状态操作
+     * 注意事项：
+     * - 必须在状态访问前调用
+     * - 影响KeyedStateStore的操作范围
+     */
     private <T> void setKeyContextElement(StreamRecord<T> record, KeySelector<T, ?> selector)
             throws Exception {
         if (selector != null) {
-            Object key = selector.getKey(record.getValue());
-            setCurrentKey(key);
+            Object key = selector.getKey(record.getValue());  // 提取业务逻辑键
+            setCurrentKey(key);  // 更新线程本地键存储
         }
     }
 
+    /**
+     * 设置当前处理键（线程本地存储）
+     * @param key 业务键对象（需实现正确hashCode和equals）
+     */
     public void setCurrentKey(Object key) {
-        stateHandler.setCurrentKey(key);
+        stateHandler.setCurrentKey(key);  // 委托给状态处理器
     }
 
-    public Object getCurrentKey() {
-        return stateHandler.getCurrentKey();
-    }
+// ------------------------- 状态存储访问 -------------------------
 
+    /**
+     * 获取当前键控状态存储
+     * @return 可能为null（未初始化时）
+     *
+     * 典型应用场景：
+     * - 访问KeyedState（ValueState/ListState等）
+     * - 注册状态有效期TTL
+     */
     public KeyedStateStore getKeyedStateStore() {
-        if (stateHandler == null) {
-            return null;
-        }
-        return stateHandler.getKeyedStateStore().orElse(null);
+        return stateHandler != null
+                ? stateHandler.getKeyedStateStore().orElse(null)
+                : null;
     }
 
-    // ------------------------------------------------------------------------
-    //  Context and chaining properties
-    // ------------------------------------------------------------------------
+// ------------------------- 链式策略配置 -------------------------
 
+    /**
+     * 设置操作符链式策略
+     * @param strategy 链式策略枚举（HEAD/ALWAYS/NEVER等）
+     *
+     * 策略说明：
+     * - HEAD：只能作为链头节点
+     * - ALWAYS：允许前后链接（默认）
+     * - NEVER：禁止链式连接
+     */
     @Override
     public final void setChainingStrategy(ChainingStrategy strategy) {
         this.chainingStrategy = strategy;
@@ -583,11 +767,12 @@ public abstract class AbstractStreamOperator<OUT>
         return chainingStrategy;
     }
 
-    // ------------------------------------------------------------------------
-    //  Metrics
-    // ------------------------------------------------------------------------
+// ------------------------- 延迟指标处理 -------------------------
 
-    // ------- One input stream
+    /**
+     * 处理单输入流的延迟标记（默认实现）
+     * @param latencyMarker 延迟跟踪标记
+     */
     public void processLatencyMarker(LatencyMarker latencyMarker) throws Exception {
         reportOrForwardLatencyMarker(latencyMarker);
     }
@@ -601,17 +786,17 @@ public abstract class AbstractStreamOperator<OUT>
         reportOrForwardLatencyMarker(latencyMarker);
     }
 
+    /**
+     * 统一延迟处理逻辑：
+     * 1. 记录本地延迟统计
+     * 2. 向下游转发标记（sink节点除外）
+     */
     protected void reportOrForwardLatencyMarker(LatencyMarker marker) {
-        // all operators are tracking latencies
-        this.latencyStats.reportLatency(marker);
-
-        // everything except sinks forwards latency markers
-        this.output.emitLatencyMarker(marker);
+        latencyStats.reportLatency(marker);   // 更新本地延迟直方图
+        output.emitLatencyMarker(marker);     // 传播至下游操作符
     }
 
-    // ------------------------------------------------------------------------
-    //  Watermark handling
-    // ------------------------------------------------------------------------
+// ------------------------- 定时器服务管理 -------------------------
 
     /**
      * Returns a {@link InternalTimerService} that can be used to query current processing time and
@@ -654,8 +839,19 @@ public abstract class AbstractStreamOperator<OUT>
         output.emitWatermark(mark);
     }
 
+    /**
+     * 组合水印处理核心逻辑：
+     * 1. 更新对应输入通道的水印状态
+     * 2. 计算全局最小水印并传播
+     * 3. 处理空闲状态转换
+     *
+     * @param index 输入流索引（0-based）
+     * @param mark 当前水印值
+     */
     private void processWatermark(Watermark mark, int index) throws Exception {
+        // 更新组合水印状态
         if (combinedWatermark.updateWatermark(index, mark.getTimestamp())) {
+            // 当组合水印前进时，触发全局处理
             processWatermark(new Watermark(combinedWatermark.getCombinedWatermark()));
         }
     }
@@ -706,21 +902,22 @@ public abstract class AbstractStreamOperator<OUT>
                 new RecordAttributesBuilder(Collections.singletonList(recordAttributes)).build());
     }
 
+    /**
+     * 处理记录属性（实验性API）
+     * @param recordAttributes 包含数据特征描述（如数据倾斜标记）
+     *
+     * 当前实现：
+     * - 收集所有输入通道的最新属性
+     * - 组合后向下游广播
+     */
     @Experimental
     public void processRecordAttributes1(RecordAttributes recordAttributes) {
-        lastRecordAttributes1 = recordAttributes;
+        lastRecordAttributes1 = recordAttributes;  // 更新通道1属性缓存
         output.emitRecordAttributes(
                 new RecordAttributesBuilder(
-                                Arrays.asList(lastRecordAttributes1, lastRecordAttributes2))
-                        .build());
+                        Arrays.asList(lastRecordAttributes1, lastRecordAttributes2)
+                ).build()  // 组合双流属性
+        );
     }
 
-    @Experimental
-    public void processRecordAttributes2(RecordAttributes recordAttributes) {
-        lastRecordAttributes2 = recordAttributes;
-        output.emitRecordAttributes(
-                new RecordAttributesBuilder(
-                                Arrays.asList(lastRecordAttributes1, lastRecordAttributes2))
-                        .build());
-    }
 }

@@ -32,331 +32,258 @@ import java.io.Serializable;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * A coordinator for runtime operators. The OperatorCoordinator runs on the master, associated with
- * the job vertex of the operator. It communicates with operators via sending operator events.
+ * 操作符协调器接口定义，负责在JobMaster中协调运行时操作符的全局行为
+ * 核心职责包括：
+ * 1. 管理操作符子任务的生命周期（启动/重置/失败处理）
+ * 2. 协调检查点机制与状态恢复
+ * 3. 处理操作符事件通信
  *
- * <p>Operator coordinators are for example source and sink coordinators that discover and assign
- * work, or aggregate and commit metadata.
- *
- * <h2>Thread Model</h2>
- *
- * <p>All coordinator methods are called by the Job Manager's main thread (mailbox thread). That
- * means that these methods must not, under any circumstances, perform blocking operations (like I/O
- * or waiting on locks or futures). That would run a high risk of bringing down the entire
- * JobManager.
- *
- * <p>Coordinators that involve more complex operations should hence spawn threads to handle the I/O
- * work. The methods on the {@link Context} are safe to be called from another thread than the
- * thread that calls the Coordinator's methods.
- *
- * <h2>Consistency</h2>
- *
- * <p>The coordinator's view of the task execution is highly simplified, compared to the Scheduler's
- * view, but allows for consistent interaction with the operators running on the parallel subtasks.
- * In particular, the following methods are guaranteed to be called strictly in order:
- *
- * <ol>
- *   <li>{@link #executionAttemptReady(int, int, SubtaskGateway)}: Called once you can send events
- *       to the subtask execution attempt. The provided gateway is bound to that specific execution
- *       attempt. This is the start of interaction with the operator subtask attempt.
- *   <li>{@link #executionAttemptFailed(int, int, Throwable)}: Called for each subtask execution
- *       attempt as soon as the attempt failed or was cancelled. At this point, interaction with the
- *       subtask attempt should stop.
- *   <li>{@link #subtaskReset(int, long)} or {@link #resetToCheckpoint(long, byte[])}: Once the
- *       scheduler determined which checkpoint to restore, these methods notify the coordinator of
- *       that. The former method is called in case of a regional failure/recovery (affecting
- *       possible a subset of subtasks), the later method in case of a global failure/recovery. This
- *       method should be used to determine which actions to recover, because it tells you which
- *       checkpoint to fall back to. The coordinator implementation needs to recover the
- *       interactions with the relevant tasks since the checkpoint that is restored. It will be
- *       called only after {@link #executionAttemptFailed(int, int, Throwable)} has been called on
- *       all the attempts of the subtask.
- *   <li>{@link #executionAttemptReady(int, int, SubtaskGateway)}: Called again, once the recovered
- *       tasks (new attempts) are ready to go. This is later than {@link #subtaskReset(int, long)},
- *       because between those methods, the new attempts are scheduled and deployed.
- * </ol>
+ * @see org.apache.flink.runtime.jobgraph.OperatorID 关联的操作符唯一标识
+ * @see CheckpointListener 检查点监听接口
  */
-/**
- * @授课老师(微信): yi_locus
- * email: 156184212@qq.com
- * 运行时Operator的协调器。OperatorCoordinator在与Operator作业顶点相关联的主机上运行。它通过发送Operator事件与操作员进行通信。
- * OperatorCoordinator代表的是runtime operators，其运行在JobMaster中，
- * 一个OperatorCoordinator对应的是一个operator的Job vertex,其和operators的交互是通过operator event。
- * 主要负责subTask的重启、失败等，以及operator的checkpoint行为。
-*/
 @Internal
 public interface OperatorCoordinator extends CheckpointListener, AutoCloseable {
 
     /**
-     * The checkpoint ID passed to the restore methods when no completed checkpoint exists, yet. It
-     * indicates that the restore is to the "initial state" of the coordinator or the failed
-     * subtask.
+     * 表示无有效检查点的特殊标识，用于恢复初始状态
      */
     long NO_CHECKPOINT = -1L;
 
-    // ------------------------------------------------------------------------
+    // --------------------------- 生命周期管理 ---------------------------
 
     /**
-     * Starts the coordinator. This method is called once at the beginning, before any other
-     * methods.
+     * 启动协调器，在作业启动时由JobManager调用
+     * @throws Exception 启动失败将导致整个作业失败
      *
-     * @throws Exception Any exception thrown from this method causes a full job failure.
+     * 实现建议：
+     * - 初始化内部状态
+     * - 建立与外部系统的连接
+     * - 启动后台线程（如有需要）
      */
-    /**
-     * @授课老师(微信): yi_locus
-     * email: 156184212@qq.com
-     * 启动 coordinator。此方法在开始时调用一次，然后再调用任何其他方法。
-    */
     void start() throws Exception;
 
     /**
-     * This method is called when the coordinator is disposed. This method should release currently
-     * held resources. Exceptions in this method do not cause the job to fail.
+     * 关闭协调器并释放资源
+     * @throws Exception 关闭异常将被记录但不会导致作业失败
+     *
+     * 注意：
+     * - 必须确保线程安全
+     * - 需要处理中断场景
      */
-    /**
-     * @授课老师(微信): yi_locus
-     * email: 156184212@qq.com
-     * 启动协调员。此方法在开始时调用一次，然后再调用任何其他方法。
-    */
     @Override
     void close() throws Exception;
 
-    // ------------------------------------------------------------------------
+    // ------------------------- 事件处理机制 -------------------------
 
     /**
-     * Hands an OperatorEvent coming from a parallel Operator instance (one attempt of the parallel
-     * subtasks).
+     * 处理来自操作符子任务的事件
+     * @param subtask       源子任务索引（0 ~ parallelism-1）
+     * @param attemptNumber 子任务执行尝试次数（用于处理失败重试）
+     * @param event         操作符事件负载
+     * @throws Exception 处理失败将触发作业全局恢复
      *
-     * @throws Exception Any exception thrown by this method results in a full job failure and
-     *     recovery.
+     * 典型应用场景：
+     * - 接收子任务状态汇报
+     * - 处理子任务请求的协调操作
      */
-    /**
-     * @授课老师(微信): yi_locus
-     * email: 156184212@qq.com
-     * 传递来自并行Operator实例的OperatorEvent（一次并行尝试子任务）。
-    */
-    void handleEventFromOperator(int subtask, int attemptNumber, OperatorEvent event)
-            throws Exception;
+    void handleEventFromOperator(int subtask, int attemptNumber, OperatorEvent event) throws Exception;
 
-    // ------------------------------------------------------------------------
+    // ------------------------ 检查点协调机制 ------------------------
 
     /**
-     * Takes a checkpoint of the coordinator. The checkpoint is identified by the given ID.
+     * 执行协调器检查点
+     * @param checkpointId  唯一检查点ID
+     * @param resultFuture  用于返回检查点状态的Future
+     * @throws Exception 检查点失败将触发作业恢复
      *
-     * <p>To confirm the checkpoint and store state in it, the given {@code CompletableFuture} must
-     * be completed with the state. To abort or dis-confirm the checkpoint, the given {@code
-     * CompletableFuture} must be completed exceptionally. In any case, the given {@code
-     * CompletableFuture} must be completed in some way, otherwise the checkpoint will not progress.
+     * 实现要求：
+     * - 必须严格保证事件发送与检查点完成的顺序性
+     * - 建议使用同步机制（如锁）协调事件发送与状态保存
      *
-     * <h3>Exactly-once Semantics</h3>
-     *
-     * <p>The semantics are defined as follows:
-     *
-     * <ul>
-     *   <li>The point in time when the checkpoint future is completed is considered the point in
-     *       time when the coordinator's checkpoint takes place.
-     *   <li>The OperatorCoordinator implementation must have a way of strictly ordering the sending
-     *       of events and the completion of the checkpoint future (for example the same thread does
-     *       both actions, or both actions are guarded by a mutex).
-     *   <li>Every event sent before the checkpoint future is completed is considered before the
-     *       checkpoint.
-     *   <li>Every event sent after the checkpoint future is completed is considered to be after the
-     *       checkpoint.
-     * </ul>
-     *
-     * @throws Exception Any exception thrown by this method results in a full job failure and
-     *     recovery.
+     * 精确一次语义保证：
+     * 1. 检查点Future完成前发送的事件 → 属于该检查点之前
+     * 2. 检查点Future完成后发送的事件 → 属于该检查点之后
      */
-    /**
-     * @授课老师(微信): yi_locus
-     * email: 156184212@qq.com
-     * 获取协调员的检查点。检查点由给定的ID标识。
-    */
-    void checkpointCoordinator(long checkpointId, CompletableFuture<byte[]> resultFuture)
-            throws Exception;
+    void checkpointCoordinator(long checkpointId, CompletableFuture<byte[]> resultFuture) throws Exception;
 
     /**
-     * We override the method here to remove the checked exception. Please check the Java docs of
-     * {@link CheckpointListener#notifyCheckpointComplete(long)} for more detail semantic of the
-     * method.
+     * 通知检查点完成
+     * @param checkpointId 已完成的检查点ID
+     *
+     * 注意事项：
+     * - 此方法调用不保证顺序性
+     * - 需处理重复通知的情况
      */
     @Override
     void notifyCheckpointComplete(long checkpointId);
 
     /**
-     * We override the method here to remove the checked exception. Please check the Java docs of
-     * {@link CheckpointListener#notifyCheckpointAborted(long)} for more detail semantic of the
-     * method.
+     * 通知检查点中止
+     * @param checkpointId 被中止的检查点ID
      */
     @Override
     default void notifyCheckpointAborted(long checkpointId) {}
 
+    // ------------------------ 状态恢复机制 ------------------------
+
     /**
-     * Resets the coordinator to the given checkpoint. When this method is called, the coordinator
-     * can discard all other in-flight working state. All subtasks will also have been reset to the
-     * same checkpoint.
+     * 全局恢复协调器状态（JobManager故障恢复时调用）
+     * @param checkpointId 要恢复到的检查点ID
+     * @param checkpointData 检查点数据（可能为null）
+     * @throws Exception 恢复失败将导致作业无法启动
      *
-     * <p>This method is called in the case of a <i>global failover</i> of the system, which means a
-     * failover of the coordinator (JobManager). This method is not invoked on a <i>partial
-     * failover</i>; partial failovers call the {@link #subtaskReset(int, long)} method for the
-     * involved subtasks.
-     *
-     * <p>This method is expected to behave synchronously with respect to other method calls and
-     * calls to {@code Context} methods. For example, Events being sent by the Coordinator after
-     * this method returns are assumed to take place after the checkpoint that was restored.
-     *
-     * <p>This method is called with a null state argument in the following situations:
-     *
-     * <ul>
-     *   <li>There is a recovery and there was no completed checkpoint yet.
-     *   <li>There is a recovery from a completed checkpoint/savepoint but it contained no state for
-     *       the coordinator.
-     * </ul>
-     *
-     * <p>In both cases, the coordinator should reset to an empty (new) state.
-     *
-     * <h2>Restoring implicitly notifies of Checkpoint Completion</h2>
-     *
-     * <p>Restoring to a checkpoint is a way of confirming that the checkpoint is complete. It is
-     * safe to commit side-effects that are predicated on checkpoint completion after this call.
-     *
-     * <p>Even if no call to {@link #notifyCheckpointComplete(long)} happened, the checkpoint can
-     * still be complete (for example when a system failure happened directly after committing the
-     * checkpoint, before calling the {@link #notifyCheckpointComplete(long)} method).
+     * 特殊场景处理：
+     * - checkpointData为null时表示恢复到初始状态
+     * - 必须确保恢复后状态与子任务状态一致
      */
     void resetToCheckpoint(long checkpointId, @Nullable byte[] checkpointData) throws Exception;
 
-    // ------------------------------------------------------------------------
-
     /**
-     * Called if a subtask is recovered as part of a <i>partial failover</i>, meaning a failover
-     * handled by the scheduler's failover strategy (by default recovering a pipelined region). The
-     * method is invoked for each subtask involved in that partial failover.
+     * 子任务级重置（部分故障恢复时调用）
+     * @param subtask      需要重置的子任务索引
+     * @param checkpointId 目标检查点ID
      *
-     * <p>In contrast to this method, the {@link #resetToCheckpoint(long, byte[])} method is called
-     * in the case of a global failover, which is the case when the coordinator (JobManager) is
-     * recovered.
-     *
-     * <p>Note that this method will not be called if an execution attempt of a subtask failed, if
-     * the subtask is not entirely failed, i.e. if the subtask has other execution attempts that are
-     * not failed/canceled.
+     * 与全局恢复的区别：
+     * - 仅影响指定子任务
+     * - 通常由调度器的局部恢复策略触发
      */
     void subtaskReset(int subtask, long checkpointId);
 
+    // ---------------------- 子任务生命周期监控 ----------------------
+
     /**
-     * Called when any subtask execution attempt of the task running the coordinated operator is
-     * failed/canceled.
+     * 处理子任务执行失败事件
+     * @param subtask       失败子任务索引
+     * @param attemptNumber 失败尝试次数
+     * @param reason        失败原因（可能为null）
      *
-     * <p>This method is called every time an execution attempt is failed/canceled, regardless of
-     * whether there it is caused by a partial failover or a global failover.
+     * 后续处理：
+     * - 停止向该子任务发送事件
+     * - 记录错误指标
      */
     void executionAttemptFailed(int subtask, int attemptNumber, @Nullable Throwable reason);
 
     /**
-     * This is called when a subtask execution attempt of the Operator becomes ready to receive
-     * events. The given {@code SubtaskGateway} can be used to send events to the execution attempt.
+     * 通知子任务准备就绪
+     * @param subtask       子任务索引
+     * @param attemptNumber 执行尝试次数
+     * @param gateway       子任务通信网关
      *
-     * <p>The given {@code SubtaskGateway} is bound to that specific execution attempt that became
-     * ready. All events sent through the gateway target that execution attempt; if the attempt is
-     * no longer running by the time the event is sent, then the events are failed.
+     * 典型操作：
+     * - 发送初始化事件
+     * - 同步状态信息
      */
     void executionAttemptReady(int subtask, int attemptNumber, SubtaskGateway gateway);
 
-    // ------------------------------------------------------------------------
-    // ------------------------------------------------------------------------
+    // -------------------------- 上下文接口 --------------------------
 
     /**
-     * The context gives the OperatorCoordinator access to contextual information and provides a
-     * gateway to interact with other components, such as sending operator events.
+     * 协调器上下文接口，提供环境信息访问入口
      */
     interface Context {
-
-        /** Gets the ID of the operator to which the coordinator belongs. */
+        /**
+         * 获取操作符唯一标识
+         * @return OperatorID实例
+         */
         OperatorID getOperatorId();
 
-        /** Gets the metric group of the operator coordinator. */
+        /**
+         * 获取指标收集器
+         * @return 预绑定的度量组
+         */
         OperatorCoordinatorMetricGroup metricGroup();
 
         /**
-         * Fails the job and trigger a global failover operation.
+         * 触发作业级故障恢复
+         * @param cause 故障原因
          *
-         * <p>This operation restores the entire job to the latest complete checkpoint. This is
-         * useful to recover from inconsistent situations (the view from the coordinator and its
-         * subtasks as diverged), but is expensive and should be used with care.
+         * 使用场景：
+         * - 检测到不可恢复的协调状态不一致
+         * - 关键外部系统连接丢失
          */
         void failJob(Throwable cause);
 
-        /** Gets the current parallelism with which this operator is executed. */
+        /**
+         * 获取当前操作符并行度
+         * @return 并行度数值
+         */
         int currentParallelism();
 
         /**
-         * Gets the classloader that contains the additional dependencies, which are not part of the
-         * JVM's classpath.
+         * 获取用户代码类加载器
+         * @return 隔离的类加载器实例
          */
         ClassLoader getUserCodeClassloader();
 
         /**
-         * Gets the {@link CoordinatorStore} instance for sharing information between {@link
-         * OperatorCoordinator}s.
+         * 获取协调器共享存储
+         * @return 线程安全的存储容器
          */
         CoordinatorStore getCoordinatorStore();
 
         /**
-         * Gets that whether the coordinator supports an execution vertex to have multiple
-         * concurrent running execution attempts.
+         * 是否支持并发执行尝试
+         * @return true表示允许同一子任务多个执行实例
          */
         boolean isConcurrentExecutionAttemptsSupported();
 
-        /** Gets the checkpoint coordinator of this job. Return null if checkpoint is disabled. */
+        /**
+         * 获取检查点协调器
+         * @return 可能为null（检查点禁用时）
+         */
         @Nullable
         CheckpointCoordinator getCheckpointCoordinator();
     }
 
-    // ------------------------------------------------------------------------
+    // ------------------------ 子任务通信网关 ------------------------
 
     /**
-     * The {@code SubtaskGateway} is the way to interact with a specific parallel instance of the
-     * Operator (an Operator subtask), like sending events to the operator.
+     * 子任务通信网关接口
      */
     interface SubtaskGateway {
-
         /**
-         * Sends an event to the parallel subtask with the given subtask index.
+         * 发送操作符事件到对应子任务
+         * @param evt 事件对象
+         * @return 异步确认Future
          *
-         * <p>The returned future is completed successfully once the event has been received by the
-         * target TaskManager. The future is completed exceptionally if the event cannot be sent.
-         * That includes situations where the target task is not running.
+         * 注意事项：
+         * - 事件发送不保证可靠性
+         * - 需处理子任务已终止的情况
          */
         CompletableFuture<Acknowledge> sendEvent(OperatorEvent evt);
 
         /**
-         * Gets the execution attempt for the subtask execution attempt that this gateway
-         * communicates with.
+         * 获取目标执行尝试ID
+         * @return 唯一执行标识
          */
         ExecutionAttemptID getExecution();
 
         /**
-         * Gets the subtask index of the parallel operator instance this gateway communicates with.
+         * 获取目标子任务索引
+         * @return 0到并行度-1之间的整数
          */
         int getSubtask();
     }
 
-    // ------------------------------------------------------------------------
+    // ------------------------- 协调器工厂接口 ------------------------
 
     /**
-     * The provider creates an OperatorCoordinator and takes a {@link Context} to pass to the
-     * OperatorCoordinator. This method is, for example, called on the job manager when the
-     * scheduler and execution graph are created, to instantiate the OperatorCoordinator.
-     *
-     * <p>The factory is {@link Serializable}, because it is attached to the JobGraph and is part of
-     * the serialized job graph that is sent to the dispatcher, or stored for recovery.
+     * 协调器工厂接口（需支持序列化）
      */
     interface Provider extends Serializable {
-
-        /** Gets the ID of the operator to which the coordinator belongs. */
+        /**
+         * 获取关联操作符ID
+         * @return 操作符唯一标识
+         */
         OperatorID getOperatorId();
 
-        /** Creates the {@code OperatorCoordinator}, using the given context. */
+        /**
+         * 创建协调器实例
+         * @param context 上下文对象
+         * @return 初始化后的协调器
+         * @throws Exception 实例化失败将导致作业提交失败
+         */
         OperatorCoordinator create(Context context) throws Exception;
     }
 }
+

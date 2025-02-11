@@ -21,127 +21,104 @@ package org.apache.flink.api.common.state;
 import org.apache.flink.annotation.Public;
 
 /**
- * This interface is typically only needed for transactional interaction with the "outside world",
- * like committing external side effects on checkpoints. An example is committing external
- * transactions once a checkpoint completes.
+ * 该接口通常仅用于与“外部世界”的事务性交互，例如在检查点（Checkpoint）提交外部副作用。
+ * 一个典型的例子是：在检查点完成后提交外部事务。
  *
- * <h3>Invocation Guarantees</h3>
+ * <h3>调用保证（Invocation Guarantees）</h3>
  *
- * <p>It is NOT guaranteed that the implementation will receive a notification for each completed or
- * aborted checkpoint. While these notifications come in most cases, notifications might not happen,
- * for example, when a failure/restore happens directly after a checkpoint completed.
+ * <p>并不保证实现类一定会收到每个已完成或已中止的检查点的通知。
+ * 在大多数情况下会收到通知，但在某些情况下可能不会，例如在检查点完成后立即发生故障或恢复的情况。
  *
- * <p>To handle this correctly, implementation should follow the "Checkpoint Subsuming Contract"
- * described below.
+ * <p>为了正确处理这一点，实现类应遵循下文所述的“检查点替代契约”（Checkpoint Subsuming Contract）。
  *
- * <h3>Exceptions</h3>
+ * <h3>异常处理（Exceptions）</h3>
  *
- * <p>The notifications from this interface come "after the fact", meaning after the checkpoint has
- * been aborted or completed. Throwing an exception will not change the completion/abortion of the
- * checkpoint.
+ * <p>此接口的通知是“事后”的，即通知发生在检查点已完成或已中止之后。
+ * 因此，抛出异常不会改变检查点的完成或中止状态。
  *
- * <p>Exceptions thrown from this method result in task- or job failure and recovery.
+ * <p>如果此方法抛出异常，会导致任务或作业失败，并触发恢复机制。
  *
- * <h3>Checkpoint Subsuming Contract</h3>
+ * <h3>检查点替代契约（Checkpoint Subsuming Contract）</h3>
  *
- * <p>Checkpoint IDs are strictly increasing. A checkpoint with higher ID always subsumes a
- * checkpoint with lower ID. For example, when checkpoint T is confirmed complete, the code can
- * assume that no checkpoints with lower ID (T-1, T-2, etc.) are pending any more. <b>No checkpoint
- * with lower ID will ever be committed after a checkpoint with a higher ID.</b>
+ * <p>检查点 ID 递增，并且 ID 较高的检查点会取代 ID 较低的检查点。
+ * 例如，当检查点 T 确认完成时，代码可以假设没有 ID 更低的检查点（T-1、T-2 等）仍然处于挂起状态。
+ * <b>不会在更高 ID 的检查点提交后再提交 ID 更低的检查点。</b>
  *
- * <p>This does not necessarily mean that all of the previous checkpoints actually completed
- * successfully. It is also possible that some checkpoint timed out or was not fully acknowledged by
- * all tasks. Implementations must then behave as if that checkpoint did not happen. The recommended
- * way to do this is to let the completion of a new checkpoint (higher ID) subsume the completion of
- * all earlier checkpoints (lower ID).
+ * <p>这并不意味着所有较早的检查点都已成功完成。
+ * 某些检查点可能因超时或未被所有任务完全确认而失败。
+ * 实现类必须表现得好像该检查点从未发生过。
+ * 推荐的做法是让新检查点（ID 更高）完成时自动取代所有较早检查点（ID 较低）的完成状态。
  *
- * <p>This property is easy to achieve for cases where increasing "offsets", "watermarks", or other
- * progress indicators are communicated on checkpoint completion. A newer checkpoint will have a
- * higher "offset" (more progress) than the previous checkpoint, so it automatically subsumes the
- * previous one. Remember the "offset to commit" for a checkpoint ID and commit it when that
- * specific checkpoint (by ID) gets the notification that it is complete.
+ * <p>如果在检查点完成时传播的是“偏移量”（offsets）、“水位线”（watermarks）或其他进度指标，
+ * 则较新的检查点会具有更高的“偏移量”（即更大进展），从而自动取代先前的检查点。
+ * 记录一个检查点 ID 的提交偏移量，并在接收到该检查点完成的通知时提交。
  *
- * <p>If you need to publish some specific artifacts (like files) or acknowledge some specific IDs
- * after a checkpoint, you can follow a pattern like below.
+ * <p>如果你需要在检查点完成后发布特定的工件（如文件）或确认特定 ID，可以遵循以下模式：
  *
- * <h3>Implementing Checkpoint Subsuming for Committing Artifacts</h3>
+ * <h3>用于提交工件的检查点替代模式</h3>
  *
- * <p>The following is a sample pattern how applications can publish specific artifacts on
- * checkpoint. Examples would be operators that acknowledge specific IDs or publish specific files
- * on checkpoint.
+ * <p>以下模式展示了应用程序如何在检查点提交特定工件。
+ * 例如，一些算子可能需要在检查点时确认特定 ID 或发布特定文件。
  *
  * <ul>
- *   <li>During processing, have two sets of artifacts.
+ *   <li>在处理过程中，维护两个工件集合：
  *       <ol>
- *         <li>A "ready set": Artifacts that are ready to be published as part of the next
- *             checkpoint. Artifacts are added to this set as soon as they are ready to be
- *             committed. This set is "transient", it is not stored in Flink's state persisted
- *             anywhere.
- *         <li>A "pending set": Artifacts being committed with a checkpoint. The actual publishing
- *             happens when the checkpoint is complete. This is a map of "{@code long =>
- *             List<Artifact>}", mapping from the id of the checkpoint when the artifact was ready
- *             to the artifacts. /li>
+ *         <li><b>“待提交集合”（ready set）</b>：存储准备在下一个检查点提交的工件。
+ *             一旦工件准备好提交，就会添加到此集合。
+ *             该集合是“瞬时”的，不会存储在 Flink 的状态中。
+ *         <li><b>“挂起集合”（pending set）</b>：存储正在提交的工件。
+ *             这些工件实际在检查点完成时发布。
+ *             该集合是一个映射 {@code Map<Long, List<Artifact>>}，其中键是检查点 ID，值是该检查点准备提交的工件列表。
  *       </ol>
- *   <li>On checkpoint, add that set of artifacts from the "ready set" to the "pending set",
- *       associated with the checkpoint ID. The whole "pending set" gets stored in the checkpoint
- *       state.
- *   <li>On {@code notifyCheckpointComplete()} publish all IDs/artifacts from the "pending set" up
- *       to the checkpoint with that ID. Remove these from the "pending set".
- *   <li/>
+ *   <li>在检查点发生时，将“待提交集合”中的工件移动到“挂起集合”，并与检查点 ID 关联。
+ *       整个“挂起集合”会存储在检查点状态中。
+ *   <li>在 {@code notifyCheckpointComplete()} 方法中，
+ *       发布所有检查点 ID 之前的“挂起集合”中的工件，并将其从集合中移除。
  * </ul>
  *
- * <p>That way, even if some checkpoints did not complete, or if the notification that they
- * completed got lost, the artifacts will be published as part of the next checkpoint that
- * completes.
+ * <p>这样，即使某些检查点未完成或检查点完成的通知丢失，工件仍将在下一个成功的检查点完成时发布。
  */
 @Public
 public interface CheckpointListener {
 
     /**
-     * Notifies the listener that the checkpoint with the given {@code checkpointId} completed and
-     * was committed.
+     * 通知监听器指定的检查点 {@code checkpointId} 已完成并被提交。
      *
-     * <p>These notifications are "best effort", meaning they can sometimes be skipped. To behave
-     * properly, implementers need to follow the "Checkpoint Subsuming Contract". Please see the
-     * {@link CheckpointListener class-level JavaDocs} for details.
+     * <p>这些通知是“尽力而为”（best effort）的，这意味着可能会有部分通知被跳过。
+     * 因此，实现类需要遵循“检查点替代契约”以正确处理此情况。
+     * 详细信息请参考 {@link CheckpointListener} 类的 JavaDoc 说明。
      *
-     * <p>Please note that checkpoints may generally overlap, so you cannot assume that the {@code
-     * notifyCheckpointComplete()} call is always for the latest prior checkpoint (or snapshot) that
-     * was taken on the function/operator implementing this interface. It might be for a checkpoint
-     * that was triggered earlier. Implementing the "Checkpoint Subsuming Contract" (see above)
-     * properly handles this situation correctly as well.
+     * <p>请注意，检查点可能会重叠，因此不能假设 {@code notifyCheckpointComplete()} 方法
+     * 始终针对最近的检查点（即最近触发的检查点）。
+     * 它可能适用于更早触发的检查点。
+     * 正确实现“检查点替代契约”可以妥善处理此情况。
      *
-     * <p>Please note that throwing exceptions from this method will not cause the completed
-     * checkpoint to be revoked. Throwing exceptions will typically cause task/job failure and
-     * trigger recovery.
+     * <p>请注意，此方法抛出的异常不会导致已完成的检查点被撤销。
+     * 但抛出异常通常会导致任务/作业失败，并触发恢复机制。
      *
-     * @param checkpointId The ID of the checkpoint that has been completed.
-     * @throws Exception This method can propagate exceptions, which leads to a failure/recovery for
-     *     the task. Note that this will NOT lead to the checkpoint being revoked.
+     * @param checkpointId 已完成的检查点 ID。
+     * @throws Exception 该方法可以抛出异常，异常会导致任务/作业失败并触发恢复。
+     *     但不会导致检查点被撤销。
      */
     void notifyCheckpointComplete(long checkpointId) throws Exception;
 
     /**
-     * This method is called as a notification once a distributed checkpoint has been aborted.
+     * 当分布式检查点被中止时，此方法将作为通知被调用。
      *
-     * <p><b>Important:</b> The fact that a checkpoint has been aborted does NOT mean that the data
-     * and artifacts produced between the previous checkpoint and the aborted checkpoint are to be
-     * discarded. The expected behavior is as if this checkpoint was never triggered in the first
-     * place, and the next successful checkpoint simply covers a longer time span. See the
-     * "Checkpoint Subsuming Contract" in the {@link CheckpointListener class-level JavaDocs} for
-     * details.
+     * <p><b>重要提示：</b>检查点被中止并不意味着在前一个检查点和当前中止的检查点之间生成的数据和工件需要被丢弃。
+     * 正确的行为是：假设该检查点从未触发过，下一个成功的检查点将覆盖更长的时间跨度。
+     * 详细信息请参考 {@link CheckpointListener} 类的“检查点替代契约”部分。
      *
-     * <p>These notifications are "best effort", meaning they can sometimes be skipped.
+     * <p>此通知是“尽力而为”的（best effort），意味着可能会有部分通知被跳过。
      *
-     * <p>This method is very rarely necessary to implement. The "best effort" guarantee, together
-     * with the fact that this method should not result in discarding any data (per the "Checkpoint
-     * Subsuming Contract") means it is mainly useful for earlier cleanups of auxiliary resources.
-     * One example is to pro-actively clear a local per-checkpoint state cache upon checkpoint
-     * failure.
+     * <p>通常情况下，不需要实现该方法。
+     * 由于该通知不保证每次都会触发，并且不应导致数据丢弃（遵循“检查点替代契约”），
+     * 该方法主要用于清理辅助资源。
+     * 例如，可以在检查点失败时主动清除本地的每检查点状态缓存。
      *
-     * @param checkpointId The ID of the checkpoint that has been aborted.
-     * @throws Exception This method can propagate exceptions, which leads to a failure/recovery for
-     *     the task or job.
+     * @param checkpointId 被中止的检查点 ID。
+     * @throws Exception 该方法可以抛出异常，异常会导致任务/作业失败并触发恢复机制。
      */
     default void notifyCheckpointAborted(long checkpointId) throws Exception {}
 }
+

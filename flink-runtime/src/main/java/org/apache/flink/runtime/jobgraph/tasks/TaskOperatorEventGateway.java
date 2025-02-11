@@ -30,43 +30,84 @@ import org.apache.flink.util.SerializedValue;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * Gateway to send an {@link OperatorEvent} or {@link CoordinationRequest} from a Task to the {@link
- * OperatorCoordinator} JobManager side.
+ * 该接口（TaskOperatorEventGateway）用于 **在 Flink 任务执行过程中**，
+ * 负责从 **TaskManager** 发送 {@link OperatorEvent} 或 {@link CoordinationRequest} 到
+ * **JobManager** 端的 {@link OperatorCoordinator}。
  *
- * <p>This is the first step in the chain of sending Operator Events and Requests from Operator to
- * Coordinator. Each layer adds further context, so that the inner layers do not need to know about
- * the complete context, which keeps dependencies small and makes testing easier.
+ * <p>这是从 **算子（Operator）到协调器（Coordinator）** 发送事件和请求的 **第一步**。
+ * 事件或请求在流转过程中，每一层都会增加更多的上下文信息，以保持底层组件的独立性，
+ * 降低耦合性，使得系统更易于维护和测试。
  *
+ * <h2>事件传输链路</h2>
+ * <p>事件在 Flink 集群内部的 **TaskManager** 和 **JobManager** 之间传递：
  * <pre>
- *     <li>{@code OperatorEventGateway} takes the event, enriches the event with the {@link OperatorID}, and
- *         forwards it to:</li>
- *     <li>{@link TaskOperatorEventGateway} enriches the event with the {@link ExecutionAttemptID} and
- *         forwards it to the:</li>
- *     <li>{@link JobMasterOperatorEventGateway} which is RPC interface from the TaskManager to the JobManager.</li>
+ *     1. 任务管理器（TaskManager）上的算子（Operator）调用
+ *        {@code TaskOperatorEventGateway.sendOperatorEventToCoordinator(...)} 发送事件，
+ *        该方法会附加 {@link OperatorID} 并将事件转发给：
+ *     2. {@link TaskOperatorEventGateway} 进一步为事件附加 {@link ExecutionAttemptID}，
+ *        然后将事件转发给：
+ *     3. {@link JobMasterOperatorEventGateway}，它是一个 RPC 接口，
+ *        负责将事件从 TaskManager 发送到 JobManager 上的 **OperatorCoordinator** 进行处理。
  * </pre>
+ *
+ * <h2>用途</h2>
+ * <ul>
+ *     <li>算子向协调器发送事件（Operator Event），例如：通知状态变化。</li>
+ *     <li>算子向协调器发送请求（Coordination Request），并期待一个异步响应。</li>
+ *     <li>在算子与协调器之间进行双向通信，以实现更复杂的控制逻辑，如动态调整算子参数。</li>
+ * </ul>
  */
-/**
- * @授课老师(微信): yi_locus
- * email: 156184212@qq.com
- * 从任务向 OperatorCoordinator JobManager端发送 OperatorEvent、CoordinationRequest的网关。
-*/
 public interface TaskOperatorEventGateway {
 
     /**
-     * Sends an event from the operator (identified by the given operator ID) to the operator
-     * coordinator (identified by the same ID).
+     * 发送一个 **Operator 事件**（OperatorEvent）到 JobManager 端的 **OperatorCoordinator**，
+     * 事件的目标 **OperatorCoordinator** 由 **OperatorID** 进行唯一标识。
+     *
+     * <p>算子可以通过此方法向协调器发送特定的事件，例如：
+     * <ul>
+     *     <li>算子需要通知协调器某个关键状态变化。</li>
+     *     <li>算子希望请求协调器提供额外的计算资源或调整任务策略。</li>
+     * </ul>
+     *
+     * <h3>调用流程：</h3>
+     * <ol>
+     *     <li>调用 {@code sendOperatorEventToCoordinator} 发送事件到 TaskManager 层的 TaskOperatorEventGateway。</li>
+     *     <li>TaskOperatorEventGateway 进一步封装事件，并转发给 JobManager 层的 JobMasterOperatorEventGateway。</li>
+     *     <li>最终，JobMasterOperatorEventGateway 通过 RPC 调用，将事件交给 OperatorCoordinator 处理。</li>
+     * </ol>
+     *
+     * @param operator 目标协调器的 {@link OperatorID}，用于唯一标识目标 OperatorCoordinator。
+     * @param event    要发送的事件，必须先进行序列化（{@link SerializedValue}）。
      */
-    /**
-     * @授课老师(微信): yi_locus
-     * email: 156184212@qq.com
-     * 从 operator（基于operator ID）向operator coordinator （由相同的ID标识）发送一个事件。
-    */
     void sendOperatorEventToCoordinator(OperatorID operator, SerializedValue<OperatorEvent> event);
 
     /**
-     * Sends a request from current operator to a specified operator coordinator which is identified
-     * by the given operator ID and return the response.
+     * 发送一个 **请求**（CoordinationRequest）到 JobManager 端的 **OperatorCoordinator**，
+     * 并返回一个异步的响应（CoordinationResponse）。
+     *
+     * <p>该方法允许算子向协调器发送特定的请求，并 **等待响应**，适用于需要请求-响应交互的场景。
+     *
+     * <h3>应用场景：</h3>
+     * <ul>
+     *     <li>算子需要从协调器获取配置信息，例如动态调整算子的行为。</li>
+     *     <li>算子需要查询全局共享状态，例如协调器维护的一些元数据信息。</li>
+     *     <li>算子希望在协调器端触发某些计算逻辑，并获得结果。</li>
+     * </ul>
+     *
+     * <h3>调用流程：</h3>
+     * <ol>
+     *     <li>调用 {@code sendRequestToCoordinator} 发送请求到 TaskOperatorEventGateway。</li>
+     *     <li>TaskOperatorEventGateway 进一步封装请求，并转发给 JobMasterOperatorEventGateway。</li>
+     *     <li>JobMasterOperatorEventGateway 通过 RPC 将请求转发给 OperatorCoordinator。</li>
+     *     <li>OperatorCoordinator 处理请求，并返回一个异步响应（CompletableFuture<CoordinationResponse>）。</li>
+     *     <li>最终，TaskManager 端接收该响应，并返回给请求方（算子）。</li>
+     * </ol>
+     *
+     * @param operator 目标协调器的 {@link OperatorID}，用于唯一标识目标 OperatorCoordinator。
+     * @param request  要发送的请求，必须先进行序列化（{@link SerializedValue}）。
+     * @return 一个 {@link CompletableFuture}，当协调器处理完成后，将返回一个 {@link CoordinationResponse}。
      */
     CompletableFuture<CoordinationResponse> sendRequestToCoordinator(
             OperatorID operator, SerializedValue<CoordinationRequest> request);
 }
+

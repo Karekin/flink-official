@@ -24,26 +24,37 @@ import org.apache.flink.runtime.jobgraph.tasks.TaskOperatorEventGateway;
 import org.apache.flink.runtime.jobmaster.JobMasterOperatorEventGateway;
 
 /**
- * The gateway through which an Operator can send an {@link OperatorEvent} to the {@link
- * OperatorCoordinator} on the JobManager side.
+ * 该接口（OperatorEventGateway）是算子（Operator）向作业管理器（JobManager）上的
+ * {@link OperatorCoordinator} 发送 {@link OperatorEvent} 事件的网关，是 Flink 任务中 算子与协调器交互的桥梁。
  *
- * <p>This is the first step in the chain of sending Operator Events from Operator to Coordinator.
- * Each layer adds further context, so that the inner layers do not need to know about the complete
- * context, which keeps dependencies small and makes testing easier.
+ * <p>这个接口是从算子向协调器发送 Operator 事件的 **第一步**。
+ * 在这个事件传递链条中，每一层都会添加更多的上下文信息，使得内部层无需知道完整的执行环境，
+ * 从而降低耦合性，提高测试的可行性和模块化。
+ *
+ * <p>事件的传输链路如下：
  *
  * <pre>
- *     <li>{@code OperatorEventGateway} takes the event, enriches the event with the {@link OperatorID}, and
- *         forwards it to:</li>
- *     <li>{@link TaskOperatorEventGateway} enriches the event with the {@link ExecutionAttemptID} and
- *         forwards it to the:</li>
- *     <li>{@link JobMasterOperatorEventGateway} which is RPC interface from the TaskManager to the JobManager.</li>
+ *     1. {@code OperatorEventGateway} 接口：接收算子发送的事件，并为事件附加 {@link OperatorID}，
+ *        ，确保事件是从哪个算子发出的，然后将事件转发给 TaskOperatorEventGateway；
+ *     2. {@link TaskOperatorEventGateway}：进一步为事件附加 {@link ExecutionAttemptID}，
+ *        ，用于唯一标识当前任务执行实例（ExecutionAttempt），然后转发给 JobMasterOperatorEventGateway；
+ *     3. {@link JobMasterOperatorEventGateway}：最终通过 RPC（远程过程调用）接口，将事件从
+ *        任务管理器（TaskManager）发送到作业管理器（JobManager）。
  * </pre>
+ *
+ * <p>通过这种方式，事件的上下文逐层丰富，而底层组件（如 `OperatorCoordinator`）只需要关注
+ * 处理事件的逻辑，而不需要知道事件是如何从 TaskManager 传输过来的。
  */
 public interface OperatorEventGateway {
 
     /**
-     * Sends the given event to the coordinator, where it will be handled by the {@link
-     * OperatorCoordinator#handleEventFromOperator(int, int, OperatorEvent)} method.
+     * 向作业管理器（JobManager）上的协调器（OperatorCoordinator）发送一个事件（OperatorEvent）。
+     *
+     * <p>该事件最终会由 {@link OperatorCoordinator#handleEventFromOperator(int, int, OperatorEvent)}
+     * 方法进行处理。
+     *
+     * @param event 要发送的 {@link OperatorEvent} 事件对象
      */
     void sendEventToCoordinator(OperatorEvent event);
 }
+
