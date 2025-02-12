@@ -31,109 +31,112 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * The interface for a source reader which is responsible for reading the records from the source
- * splits assigned by {@link SplitEnumerator}.
+ * SourceReader 负责从 SourceSplit 中读取记录，并将其转换为 Flink 可处理的数据流。
  *
- * <p>For most non-trivial source reader, it is recommended to use {@link
- * org.apache.flink.connector.base.source.reader.SourceReaderBase SourceReaderBase} which provides
- * an efficient hand-over protocol to avoid blocking I/O inside the task thread and supports various
- * split-threading models.
+ * <p>在 Flink 中，每个 SourceReader 会由 TaskManager 的并行任务实例化，并从 SplitEnumerator
+ * 处获取分片（Split）。然后，它会逐步读取数据并发送到下游算子。</p>
  *
- * <p>Implementations can provide the following metrics:
+ * <p>Flink 提供了 {@link org.apache.flink.connector.base.source.reader.SourceReaderBase}
+ * 作为基础实现，它提供了一种高效的数据交接协议，避免了在任务线程中执行阻塞 I/O，并支持多种
+ * 分片处理模式（如单线程读取、多线程并行读取等）。</p>
  *
+ * <p>实现类可以提供如下指标（Metrics）：</p>
  * <ul>
- *   <li>{@link OperatorIOMetricGroup#getNumRecordsInCounter()} (highly recommended)
- *   <li>{@link OperatorIOMetricGroup#getNumBytesInCounter()} (recommended)
- *   <li>{@link SourceReaderMetricGroup#getNumRecordsInErrorsCounter()} (recommended)
- *   <li>{@link SourceReaderMetricGroup#setPendingRecordsGauge(Gauge)}
- *   <li>{@link SourceReaderMetricGroup#setPendingBytesGauge(Gauge)}
+ *     <li>{@link OperatorIOMetricGroup#getNumRecordsInCounter()}（强烈推荐，记录输入的记录数）</li>
+ *     <li>{@link OperatorIOMetricGroup#getNumBytesInCounter()}（推荐，记录输入的字节数）</li>
+ *     <li>{@link SourceReaderMetricGroup#getNumRecordsInErrorsCounter()}（推荐，记录错误记录数）</li>
+ *     <li>{@link SourceReaderMetricGroup#setPendingRecordsGauge(Gauge)}（挂起的记录数指标）</li>
+ *     <li>{@link SourceReaderMetricGroup#setPendingBytesGauge(Gauge)}（挂起的字节数指标）</li>
  * </ul>
  *
- * @param <T> The type of the record emitted by this source reader.
- * @param <SplitT> The type of the source splits.
+ * @param <T>       此 SourceReader 生成的记录类型。
+ * @param <SplitT>  处理的 SourceSplit 类型，必须继承 {@link SourceSplit}。
  */
 @Public
 public interface SourceReader<T, SplitT extends SourceSplit>
         extends AutoCloseable, CheckpointListener {
 
-    /** Start the reader. */
+    /** 启动 SourceReader，通常用于初始化资源或启动异步数据读取线程。 */
     void start();
 
     /**
-     * Poll the next available record into the {@link ReaderOutput}.
+     * 轮询（poll）获取下一个可用的记录，并将其输出到 {@link ReaderOutput}。
      *
-     * <p>The implementation must make sure this method is non-blocking.
+     * <p>该方法必须是 **非阻塞** 的。如果没有可用数据，应返回 {@link InputStatus#NOTHING_AVAILABLE}，
+     * 让 Flink 运行时决定何时再次调用该方法。</p>
      *
-     * <p>Although the implementation can emit multiple records into the given ReaderOutput, it is
-     * recommended not doing so. Instead, emit one record into the ReaderOutput and return a {@link
-     * InputStatus#MORE_AVAILABLE} to let the caller thread know there are more records available.
+     * <p>虽然该方法可以一次性输出多个记录，但更推荐一次输出 **单条记录**，然后返回
+     * {@link InputStatus#MORE_AVAILABLE}，以让调用线程知道仍有更多数据可读取。</p>
      *
-     * @return The InputStatus of the SourceReader after the method invocation.
+     * @param output 记录输出接口，SourceReader 应向其中写入数据。
+     * @return 当前 SourceReader 的输入状态，决定了后续行为：
+     *     <ul>
+     *         <li>{@link InputStatus#MORE_AVAILABLE} - 仍有更多数据可读，Flink 会立即再次调用该方法。</li>
+     *         <li>{@link InputStatus#NOTHING_AVAILABLE} - 当前暂无数据可读，Flink 会等待 {@link #isAvailable()} 变为可用。</li>
+     *         <li>{@link InputStatus#END_OF_INPUT} - 所有输入数据已读取完毕，Flink 将关闭此 SourceReader。</li>
+     *     </ul>
+     * @throws Exception 读取过程中可能出现的异常，异常会触发任务失败及重启机制。
      */
     InputStatus pollNext(ReaderOutput<T> output) throws Exception;
 
     /**
-     * Checkpoint on the state of the source.
+     * 生成当前 SourceReader 的 checkpoint 状态。
+     * <p>Flink 在进行 checkpoint 时会调用该方法，将当前正在读取的分片状态进行持久化，
+     * 以便任务恢复时能继续读取未完成的数据。</p>
      *
-     * @return the state of the source.
+     * @param checkpointId  当前 checkpoint 的 ID。
+     * @return  当前 SourceReader 处理的所有分片的快照信息。
      */
     List<SplitT> snapshotState(long checkpointId);
 
     /**
-     * Returns a future that signals that data is available from the reader.
+     * 返回一个 Future，当数据可用时该 Future 变为完成状态。
      *
-     * <p>Once the future completes, the runtime will keep calling the {@link
-     * #pollNext(ReaderOutput)} method until that method returns a status other than {@link
-     * InputStatus#MORE_AVAILABLE}. After that, the runtime will again call this method to obtain
-     * the next future. Once that completes, it will again call {@link #pollNext(ReaderOutput)} and
-     * so on.
+     * <p>Flink 运行时会不断调用该方法，并在 Future 完成时调用 {@link #pollNext(ReaderOutput)}
+     * 方法获取数据。如果 Future 长时间未完成，Flink 任务将进入空闲状态。</p>
      *
-     * <p>The contract is the following: If the reader has data available, then all futures
-     * previously returned by this method must eventually complete. Otherwise the source might stall
-     * indefinitely.
+     * <p>该方法的正确性约定如下：
+     * <ul>
+     *     <li>如果 SourceReader 仍有可用数据，则之前返回的所有 Future **必须最终完成**，否则任务可能会无限挂起。</li>
+     *     <li>如果 SourceReader 确实无数据可读，不应直接返回已完成的 Future，否则会导致高频轮询，造成 CPU 过载。</li>
+     * </ul>
+     * </p>
      *
-     * <p>It is not a problem to have occasional "false positives", meaning to complete a future
-     * even if no data is available. However, one should not use an "always complete" future in
-     * cases no data is available, because that will result in busy waiting loops calling {@code
-     * pollNext(...)} even though no data is available.
-     *
-     * @return a future that will be completed once there is a record available to poll.
+     * @return 当有可用记录时变为完成状态的 Future。
      */
     CompletableFuture<Void> isAvailable();
 
     /**
-     * Adds a list of splits for this reader to read. This method is called when the enumerator
-     * assigns a split via {@link SplitEnumeratorContext#assignSplit(SourceSplit, int)} or {@link
-     * SplitEnumeratorContext#assignSplits(SplitsAssignment)}.
+     * 由 SplitEnumerator 负责调用，将新分配的 Split 添加到当前 Reader 进行读取。
      *
-     * @param splits The splits assigned by the split enumerator.
+     * @param splits 新分配的 Split 列表。
      */
     void addSplits(List<SplitT> splits);
 
     /**
-     * This method is called when the reader is notified that it will not receive any further
-     * splits.
+     * 通知当前 Reader 不会再收到新的 Split 任务。
      *
-     * <p>It is triggered when the enumerator calls {@link
-     * SplitEnumeratorContext#signalNoMoreSplits(int)} with the reader's parallel subtask.
+     * <p>当 SplitEnumerator 调用 {@link SplitEnumeratorContext#signalNoMoreSplits(int)}
+     * 时，Flink 运行时会调用该方法，表示该 Reader 任务可以执行收尾操作并准备终止。</p>
      */
     void notifyNoMoreSplits();
 
     /**
-     * Handle a custom source event sent by the {@link SplitEnumerator}. This method is called when
-     * the enumerator sends an event via {@link SplitEnumeratorContext#sendEventToSourceReader(int,
-     * SourceEvent)}.
+     * 处理 SplitEnumerator 发送的自定义事件。
      *
-     * <p>This method has a default implementation that does nothing, because most sources do not
-     * require any custom events.
+     * <p>SplitEnumerator 可以通过 {@link SplitEnumeratorContext#sendEventToSourceReader(int, SourceEvent)}
+     * 向 SourceReader 发送 SourceEvent 事件。本方法用于接收并处理这些事件。</p>
      *
-     * @param sourceEvent the event sent by the {@link SplitEnumerator}.
+     * <p>大多数 Source 并不需要特殊的自定义事件，因此此方法默认实现为空。</p>
+     *
+     * @param sourceEvent SplitEnumerator 发送的事件。
      */
     default void handleSourceEvents(SourceEvent sourceEvent) {}
 
     /**
-     * We have an empty default implementation here because most source readers do not have to
-     * implement the method.
+     * 当一个 Checkpoint 完成时，通知 SourceReader。
+     *
+     * <p>默认实现为空，通常 SourceReader 不需要处理 Checkpoint 完成的事件。</p>
      *
      * @see CheckpointListener#notifyCheckpointComplete(long)
      */
@@ -141,32 +144,27 @@ public interface SourceReader<T, SplitT extends SourceSplit>
     default void notifyCheckpointComplete(long checkpointId) throws Exception {}
 
     /**
-     * Pauses or resumes reading of individual source splits.
+     * 用于暂停或恢复指定的分片读取。
      *
-     * <p>Note that no other methods can be called in parallel, so updating subscriptions can be
-     * done atomically. This method is simply providing connectors with more expressive APIs the
-     * opportunity to update all subscriptions at once.
+     * <p>此方法的主要用途是 **对齐水位线（watermark alignment）**，当 Flink 需要对不同的
+     * SourceSplit 进行时间对齐时，可以通过此方法暂停某些进度过快的 Split，并恢复进度较慢的 Split。</p>
      *
-     * <p>This is currently used to align the watermarks of splits, if watermark alignment is used
-     * and the source reads from more than one split.
+     * <p>默认实现抛出 {@link UnsupportedOperationException}，未来的 Flink 版本可能会移除该默认实现。
+     * 因此建议所有 SourceReader 实现类都应覆盖该方法。</p>
      *
-     * <p>The default implementation throws an {@link UnsupportedOperationException} where the
-     * default implementation will be removed in future releases. To be compatible with future
-     * releases, it is recommended to implement this method and override the default implementation.
-     *
-     * @param splitsToPause the splits to pause
-     * @param splitsToResume the splits to resume
+     * @param splitsToPause  需要暂停的 Split ID 集合。
+     * @param splitsToResume 需要恢复的 Split ID 集合。
      */
     @PublicEvolving
     default void pauseOrResumeSplits(
             Collection<String> splitsToPause, Collection<String> splitsToResume) {
         throw new UnsupportedOperationException(
-                "This source reader does not support pausing or resuming splits which can lead to unaligned splits.\n"
-                        + "Unaligned splits are splits where the output watermarks of the splits have diverged more than the allowed limit.\n"
-                        + "It is highly discouraged to use unaligned source splits, as this leads to unpredictable\n"
-                        + "watermark alignment if there is more than a single split per reader. It is recommended to implement pausing splits\n"
-                        + "for this source. At your own risk, you can allow unaligned source splits by setting the\n"
-                        + "configuration parameter `pipeline.watermark-alignment.allow-unaligned-source-splits' to true.\n"
-                        + "Beware that this configuration parameter will be dropped in a future Flink release.");
+                "此 SourceReader 不支持暂停或恢复分片，这可能会导致水位线未对齐。\n"
+                        + "未对齐的分片可能导致水位线偏移超出允许范围，进而影响事件时间窗口计算。\n"
+                        + "强烈建议实现此方法，以支持流式数据的水位线对齐。\n"
+                        + "如需继续使用未对齐的分片，可以在 Flink 配置中设置\n"
+                        + "pipeline.watermark-alignment.allow-unaligned-source-splits = true。\n"
+                        + "但请注意，未来 Flink 版本可能会移除该配置选项。");
     }
 }
+

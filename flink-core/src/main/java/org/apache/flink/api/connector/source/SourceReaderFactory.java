@@ -23,20 +23,27 @@ import org.apache.flink.annotation.Public;
 import java.io.Serializable;
 
 /**
- * A factory for creating source reader instances.
+ * SourceReaderFactory 提供了创建 SourceReader 实例的能力。
+ * <p>在 Flink 中，每个 SourceReader 负责从一个或多个 Split（分片）中读取数据并将其转化为
+ * 下游可以处理的格式。此工厂接口定义了如何创建一个无状态的 SourceReader，用于在作业开始时
+ * 或在故障恢复（需要重新分配分片时）进行新的读取任务。</p>
  *
- * @param <T> The type of the output elements.
+ * @param <T>      此 SourceReader 生成的输出元素类型。
+ * @param <SplitT> 此 SourceReader 读取的分片类型，必须实现 {@link SourceSplit}。
  */
 @Public
 public interface SourceReaderFactory<T, SplitT extends SourceSplit> extends Serializable {
+
     /**
-     * Creates a new reader to read data from the splits it gets assigned. The reader starts fresh
-     * and does not have any state to resume.
+     * 创建一个新的 SourceReader，用于读取分配到的分片数据。此方法所返回的 SourceReader
+     * 在初始状态下并没有任何待处理的分片，直到框架分配分片给它后才会开始工作。
      *
-     * @param readerContext The {@link SourceReaderContext context} for the source reader.
-     * @return A new SourceReader.
-     * @throws Exception The implementor is free to forward all exceptions directly. Exceptions
-     *     thrown from this method cause task failure/recovery.
+     * @param readerContext 当前 SourceReader 的上下文环境。包含诸如并行子任务索引（subtask index）
+     *                      等信息，以及与外部系统交互的基础设施（如线程模型、状态后端等）。
+     * @return 新创建的 SourceReader 实例。
+     * @throws Exception 如果在创建 SourceReader 过程中出现任何异常，实现方可以直接抛出。抛出异常后，
+     *                   任务将标记为失败并触发故障恢复流程。
      */
     SourceReader<T, SplitT> createReader(SourceReaderContext readerContext) throws Exception;
 }
+

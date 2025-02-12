@@ -23,95 +23,99 @@ import org.apache.flink.api.common.eventtime.TimestampAssigner;
 import org.apache.flink.api.common.eventtime.Watermark;
 
 /**
- * The interface provided by the Flink runtime to the {@link SourceReader} to emit records, and
- * optionally watermarks, to downstream operators for message processing.
+ * Flink 运行时提供的 ReaderOutput 接口，供 {@link SourceReader} 用于向下游算子发送记录和水位线（Watermark）。
  *
- * <p>The {@code ReaderOutput} is a {@link SourceOutput} and can be used directly to emit the stream
- * of events from the source. This is recommended for sources where the SourceReader processes only
- * a single split, or where NO split-specific characteristics are required (like per-split
- * watermarks and idleness, split-specific event-time skew handling, etc.). As a special case, this
- * is true for sources that only support bounded/batch data processing.
+ * <p>{@code ReaderOutput} 继承自 {@link SourceOutput}，可直接用于输出数据流中的事件。
+ * 对于仅处理单个 Split 的 Source，或无需 Split 级别特性（如每个 Split 单独的水位线、空闲检测等）的 Source，
+ * 可以直接使用该接口进行数据输出。例如：处理批量数据（Bounded Source）时，不需要关注 Split 级别的时间管理。</p>
  *
- * <p>For most streaming sources, the {@code SourceReader} should use split-specific outputs, to
- * allow the processing logic to run per-split watermark generators, idleness detection, etc. To
- * create a split-specific {@code SourceOutput} use the {@link
- * ReaderOutput#createOutputForSplit(String)} method, using the Source Split's ID. Make sure to
- * release the output again once the source has finished processing that split.
+ * <p>对于大多数流式数据源（Streaming Source），通常应使用 Split 级别的 {@code SourceOutput}，
+ * 以便在每个 Split 级别执行水位线生成、空闲检测等逻辑。要为特定的 Split 创建 {@code SourceOutput}，
+ * 可以调用 {@link ReaderOutput#createOutputForSplit(String)} 方法，并传入 Split ID。
+ * 在处理完成该 Split 后，请务必调用 {@link ReaderOutput#releaseOutputForSplit(String)} 释放资源，
+ * 否则可能会影响水位线计算，导致全局水位线停滞。</p>
  */
 @Public
 public interface ReaderOutput<T> extends SourceOutput<T> {
 
     /**
-     * Emit a record without a timestamp.
+     * 发送一个不带时间戳的记录。
      *
-     * <p>Use this method if the source system does not have a notion of records with timestamps.
+     * <p>如果数据源不包含时间戳（如纯文本文件读取），可以使用此方法。
+     * 下游算子可以通过 {@link TimestampAssigner} 为记录附加时间戳。
+     * 例如：如果数据源是 JSON 格式的文件，文件本身没有时间戳信息，则可以使用该方法输出记录，
+     * 然后让 {@code TimestampAssigner} 从 JSON 字段中提取时间戳。</p>
      *
-     * <p>The events later pass through a {@link TimestampAssigner}, which attaches a timestamp to
-     * the event based on the event's contents. For example a file source with JSON records would
-     * not have a generic timestamp from the file reading and JSON parsing process, and thus use
-     * this method to produce initially a record without a timestamp. The {@code TimestampAssigner}
-     * in the next step would be used to extract timestamp from a field of the JSON object.
-     *
-     * @param record the record to emit.
+     * @param record 要发送的记录。
      */
     @Override
     void collect(T record);
 
     /**
-     * Emit a record with a timestamp.
+     * 发送一个带时间戳的记录。
      *
-     * <p>Use this method if the source system has timestamps attached to records. Typical examples
-     * would be Logs, PubSubs, or Message Queues, like Kafka or Kinesis, which store a timestamp
-     * with each event.
+     * <p>如果数据源本身携带时间戳信息（如 Kafka、日志系统等），可以使用此方法。
+     * 典型场景包括：
+     * <ul>
+     *     <li>Kafka 主题中的消息通常带有时间戳，可以直接使用。</li>
+     *     <li>日志流处理（如 Flink 处理 ClickStream）时，日志记录中可能有时间戳字段。</li>
+     * </ul>
+     * 该时间戳可以被 {@link TimestampAssigner} 进一步处理，决定是否使用此时间戳，或从记录内部提取新的时间戳。</p>
      *
-     * <p>The events typically still pass through a {@link TimestampAssigner}, which may decide to
-     * either use this source-provided timestamp, or replace it with a timestamp stored within the
-     * event (for example if the event was a JSON object one could configure aTimestampAssigner that
-     * extracts one of the object's fields and uses that as a timestamp).
-     *
-     * @param record the record to emit.
-     * @param timestamp the timestamp of the record.
+     * @param record    要发送的记录。
+     * @param timestamp 记录的时间戳（通常为事件时间）。
      */
     @Override
     void collect(T record, long timestamp);
 
     /**
-     * Emits the given watermark.
+     * 发送水位线（Watermark）。
      *
-     * <p>Emitting a watermark also implicitly marks the stream as <i>active</i>, ending previously
-     * marked idleness.
+     * <p>水位线用于事件时间窗口计算，表示截至某个时间点，所有早于该时间的事件均已处理完成。
+     * 发送水位线后，会自动将当前流标记为 **活跃状态**，取消之前的空闲（Idle）标记。</p>
+     *
+     * @param watermark 要发送的水位线对象。
      */
     @Override
     void emitWatermark(Watermark watermark);
 
     /**
-     * Marks this output as idle, meaning that downstream operations do not wait for watermarks from
-     * this output.
+     * 将当前输出标记为 **空闲**（Idle），表示下游算子无需再等待该流的数据或水位线。
      *
-     * <p>An output becomes active again as soon as the next watermark is emitted.
+     * <p>在流式数据处理中，部分 Source 可能会长时间不产生数据（如 Kafka 某个分区无新消息）。
+     * 标记 Idle 后，下游算子（如窗口算子）不会再依赖此流的水位线，以避免窗口计算被阻塞。</p>
+     *
+     * <p>一旦该 Source 重新发送水位线，该流会自动恢复为活跃状态。</p>
      */
     @Override
     void markIdle();
 
     /**
-     * Creates a {@code SourceOutput} for a specific Source Split. Use these outputs if you want to
-     * run split-local logic, like watermark generation.
+     * 为指定的 Source Split 创建一个独立的 {@code SourceOutput}，用于处理 Split 级别的水位线管理等逻辑。
      *
-     * <p>If a split-local output was already created for this split-ID, the method will return that
-     * instance, so that only one split-local output exists per split-ID.
+     * <p>某些数据源（如 Kafka、文件流）可能需要针对不同的 Split（如 Kafka 分区或文件块）独立生成水位线，
+     * 此方法允许为特定 Split 创建独立的输出。</p>
      *
-     * <p><b>IMPORTANT:</b> After the split has been finished, it is crucial to release the created
-     * output again. Otherwise it will continue to contribute to the watermark generation like a
-     * perpetually stalling source split, and may hold back the watermark indefinitely.
+     * <p>如果相同的 Split ID 已经创建过，则返回已有的实例，确保每个 Split 仅有一个对应的 {@code SourceOutput}。</p>
      *
+     * <p><b>重要提醒：</b> 处理完某个 Split 后，必须调用 {@link #releaseOutputForSplit(String)}
+     * 释放该 Split 的 {@code SourceOutput}，否则该 Split 仍会参与全局水位线计算，可能导致水位线滞后。</p>
+     *
+     * @param splitId 需要创建输出的 Split ID（例如 Kafka 分区 ID、文件块 ID）。
+     * @return 该 Split 对应的 {@code SourceOutput} 实例。
      * @see #releaseOutputForSplit(String)
      */
     SourceOutput<T> createOutputForSplit(String splitId);
 
     /**
-     * Releases the {@code SourceOutput} created for the split with the given ID.
+     * 释放指定 Split ID 关联的 {@code SourceOutput}。
      *
+     * <p>当 Source 完成某个 Split 的数据处理后，必须调用此方法释放资源，否则该 Split 仍会影响水位线计算，
+     * 可能导致 Flink 任务长时间停滞。</p>
+     *
+     * @param splitId 需要释放的 Split ID。
      * @see #createOutputForSplit(String)
      */
     void releaseOutputForSplit(String splitId);
 }
+
