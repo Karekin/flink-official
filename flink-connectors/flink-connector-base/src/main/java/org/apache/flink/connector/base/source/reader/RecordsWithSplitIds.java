@@ -24,37 +24,46 @@ import javax.annotation.Nullable;
 
 import java.util.Set;
 
-/** An interface for the elements passed from the fetchers to the source reader. */
+/**
+ * 一个接口，表示从 fetchers 传递到 source reader 的元素。
+ */
 @PublicEvolving
 public interface RecordsWithSplitIds<E> {
 
     /**
-     * Moves to the next split. This method is also called initially to move to the first split.
-     * Returns null, if no splits are left.
+     * 切换到下一个数据分片（split）。
+     *
+     * 该方法在初始化时也会被调用，以移动到第一个数据分片。
+     * 如果没有剩余的分片，则返回 null。
+     *
+     * @return 下一个数据分片的 ID，如果没有剩余分片，则返回 null。
      */
     @Nullable
     String nextSplit();
 
     /**
-     * Gets the next record from the current split. Returns null if no more records are left in this
-     * split.
+     * 从当前数据分片（split）获取下一条记录。
+     *
+     * 如果当前分片中没有剩余记录，则返回 null。
+     *
+     * @return 当前分片中的下一条记录，如果没有剩余记录，则返回 null。
      */
     @Nullable
     E nextRecordFromSplit();
 
     /**
-     * Get the finished splits.
+     * 获取已完成处理的数据分片集合。
      *
-     * @return the finished splits after this RecordsWithSplitIds is returned.
+     * @return 该 RecordsWithSplitIds 返回后，已完成的分片集合。
      */
     Set<String> finishedSplits();
 
     /**
-     * This method is called when all records from this batch have been emitted.
+     * 当此批次中的所有记录都已被处理完毕时调用该方法。
      *
-     * <p>Overriding this method gives implementations the opportunity to recycle/reuse this object,
-     * which is a performance optimization that is important for cases where the record objects are
-     * large or otherwise heavy to allocate.
+     * <p>重写此方法可以使实现类有机会回收或复用该对象，这是一种性能优化策略。
+     * 在记录对象较大或分配成本较高的情况下，这种优化尤为重要。
      */
     default void recycle() {}
 }
+

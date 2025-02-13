@@ -39,27 +39,35 @@ import java.util.concurrent.LinkedBlockingQueue;
 import static org.apache.flink.runtime.operators.coordination.ComponentClosingUtils.closeAsyncWithTimeout;
 
 /**
- * A class that will recreate a new {@link OperatorCoordinator} instance when reset to checkpoint.
+ * 此类在重置到检查点时会重新创建 {@link OperatorCoordinator} 实例。
  */
 public class RecreateOnResetOperatorCoordinator implements OperatorCoordinator {
     private static final Logger LOG =
             LoggerFactory.getLogger(RecreateOnResetOperatorCoordinator.class);
-    private static final long CLOSING_TIMEOUT_MS = 60000L;
-    private final Provider provider;
-    private final long closingTimeoutMs;
-    private final OperatorCoordinator.Context context;
-    private DeferrableCoordinator coordinator;
-    private boolean started;
-    private volatile boolean closed;
+    private static final long CLOSING_TIMEOUT_MS = 60000L; // 关闭超时时间（毫秒）
+    private final Provider provider; // 提供器，用于创建新的 OperatorCoordinator 实例
+    private final long closingTimeoutMs; // 关闭超时时间
+    private final OperatorCoordinator.Context context; // OperatorCoordinator 的上下文
+    private DeferrableCoordinator coordinator; // 可延迟的协调器
+    private boolean started; // 是否已启动
+    private volatile boolean closed; // 是否已关闭
 
+    /**
+     * 构造函数。
+     *
+     * @param context 上下文
+     * @param provider 提供器
+     * @param closingTimeoutMs 关闭超时时间
+     * @throws Exception 如果创建过程中发生异常
+     */
     private RecreateOnResetOperatorCoordinator(
             OperatorCoordinator.Context context, Provider provider, long closingTimeoutMs)
             throws Exception {
         this.context = context;
         this.provider = provider;
-        this.coordinator = new DeferrableCoordinator(context.getOperatorId());
-        this.coordinator.createNewInternalCoordinator(context, provider);
-        this.coordinator.processPendingCalls();
+        this.coordinator = new DeferrableCoordinator(context.getOperatorId()); // 创建可延迟的协调器
+        this.coordinator.createNewInternalCoordinator(context, provider); // 创建新的内部协调器
+        this.coordinator.processPendingCalls(); // 处理挂起的调用
         this.closingTimeoutMs = closingTimeoutMs;
         this.started = false;
         this.closed = false;
@@ -67,15 +75,15 @@ public class RecreateOnResetOperatorCoordinator implements OperatorCoordinator {
 
     @Override
     public void start() throws Exception {
-        Preconditions.checkState(!started, "coordinator already started");
+        Preconditions.checkState(!started, "coordinator already started"); // 检查是否已启动
         started = true;
-        coordinator.applyCall("start", OperatorCoordinator::start);
+        coordinator.applyCall("start", OperatorCoordinator::start); // 执行启动操作
     }
 
     @Override
     public void close() throws Exception {
         closed = true;
-        coordinator.closeAsync(closingTimeoutMs);
+        coordinator.closeAsync(closingTimeoutMs); // 异步关闭协调器
     }
 
     @Override
@@ -83,62 +91,60 @@ public class RecreateOnResetOperatorCoordinator implements OperatorCoordinator {
             throws Exception {
         coordinator.applyCall(
                 "handleEventFromOperator",
-                c -> c.handleEventFromOperator(subtask, attemptNumber, event));
+                c -> c.handleEventFromOperator(subtask, attemptNumber, event)); // 处理来自操作符的事件
     }
 
     @Override
     public void executionAttemptFailed(int subtask, int attemptNumber, @Nullable Throwable reason) {
         coordinator.applyCall(
                 "executionAttemptFailed",
-                c -> c.executionAttemptFailed(subtask, attemptNumber, reason));
+                c -> c.executionAttemptFailed(subtask, attemptNumber, reason)); // 处理执行尝试失败
     }
 
     @Override
     public void subtaskReset(int subtask, long checkpointId) {
-        coordinator.applyCall("subtaskReset", c -> c.subtaskReset(subtask, checkpointId));
+        coordinator.applyCall("subtaskReset", c -> c.subtaskReset(subtask, checkpointId)); // 重置子任务
     }
 
     @Override
     public void executionAttemptReady(int subtask, int attemptNumber, SubtaskGateway gateway) {
         coordinator.applyCall(
                 "executionAttemptReady",
-                c -> c.executionAttemptReady(subtask, attemptNumber, gateway));
+                c -> c.executionAttemptReady(subtask, attemptNumber, gateway)); // 执行尝试准备就绪
     }
 
     @Override
     public void checkpointCoordinator(long checkpointId, CompletableFuture<byte[]> resultFuture)
             throws Exception {
         coordinator.applyCall(
-                "checkpointCoordinator", c -> c.checkpointCoordinator(checkpointId, resultFuture));
+                "checkpointCoordinator", c -> c.checkpointCoordinator(checkpointId, resultFuture)); // 检查点协调器
     }
 
     @Override
     public void notifyCheckpointComplete(long checkpointId) {
-        coordinator.applyCall("checkpointComplete", c -> c.notifyCheckpointComplete(checkpointId));
+        coordinator.applyCall("checkpointComplete", c -> c.notifyCheckpointComplete(checkpointId)); // 通知检查点完成
     }
 
     @Override
     public void notifyCheckpointAborted(long checkpointId) {
-        coordinator.applyCall("checkpointAborted", c -> c.notifyCheckpointAborted(checkpointId));
+        coordinator.applyCall("checkpointAborted", c -> c.notifyCheckpointAborted(checkpointId)); // 通知检查点中止
     }
 
     @Override
     public void resetToCheckpoint(final long checkpointId, @Nullable final byte[] checkpointData) {
-        // First bump up the coordinator epoch to fence out the active coordinator.
+        // 首先增加协调器的 epoch（纪元），以隔离活动中的协调器
         LOG.info("Resetting coordinator to checkpoint.");
-        // Replace the coordinator variable with a new DeferrableCoordinator instance.
-        // At this point the internal coordinator of the new coordinator has not been created.
-        // After this point all the subsequent calls will be made to the new coordinator.
+        // 用一个新的 DeferrableCoordinator 实例替换协调器变量
+        // 在这一点上，新协调器的内部协调器尚未创建
+        // 之后的所有调用都将被发送到新的协调器
         final DeferrableCoordinator oldCoordinator = coordinator;
         final DeferrableCoordinator newCoordinator =
                 new DeferrableCoordinator(context.getOperatorId());
         coordinator = newCoordinator;
-        // Close the old coordinator asynchronously in a separate closing thread.
-        // The future will be completed when the old coordinator closes.
+        // 异步关闭旧协调器
         CompletableFuture<Void> closingFuture = oldCoordinator.closeAsync(closingTimeoutMs);
 
-        // Create and possibly start the coordinator and apply all meanwhile deferred calls
-        // capture the status whether the coordinator was started when this method was called
+        // 创建并可能启动协调器，并应用所有挂起的调用
         final boolean wasStarted = this.started;
 
         closingFuture.whenComplete(
@@ -152,7 +158,7 @@ public class RecreateOnResetOperatorCoordinator implements OperatorCoordinator {
                                 e);
                     }
                     if (!closed) {
-                        // The previous coordinator has closed. Create a new one.
+                        // 之前的协调器已关闭。创建一个新的协调器。
                         newCoordinator.createNewInternalCoordinator(context, provider);
                         newCoordinator.resetAndStart(checkpointId, checkpointData, wasStarted);
                         newCoordinator.processPendingCalls();
@@ -160,8 +166,12 @@ public class RecreateOnResetOperatorCoordinator implements OperatorCoordinator {
                 });
     }
 
-    // ---------------------
-
+    /**
+     * 获取内部协调器。
+     *
+     * @return 内部协调器
+     * @throws Exception 如果等待过程中发生异常
+     */
     public OperatorCoordinator getInternalCoordinator() throws Exception {
         waitForAllAsyncCallsFinish();
         return coordinator.internalCoordinator;
@@ -180,9 +190,9 @@ public class RecreateOnResetOperatorCoordinator implements OperatorCoordinator {
         future.get();
     }
 
-    // ---------------------
-
-    /** The provider for a private RecreateOnResetOperatorCoordinator. */
+    /**
+     * OperatorCoordinator 的提供器。
+     */
     public abstract static class Provider implements OperatorCoordinator.Provider {
         private static final long serialVersionUID = 3002837631612629071L;
         private final OperatorID operatorID;
@@ -211,14 +221,9 @@ public class RecreateOnResetOperatorCoordinator implements OperatorCoordinator {
                 throws Exception;
     }
 
-    // ----------------------
-
     /**
-     * A wrapper class around the operator coordinator context to allow quiescence. When a new
-     * operator coordinator is created, we need to quiesce the old operator coordinator to prevent
-     * it from making any further impact to the job master. This is done by quiesce the operator
-     * coordinator context. After the quiescence, the "reading" methods will still work, but the
-     * "writing" methods will become a no-op or fail immediately.
+     * 一个可静默的上下文包装类，用于在创建新的 OperatorCoordinator 时静默旧的 OperatorCoordinator，
+     * 以防止其对作业主节点产生进一步的影响。
      */
     @VisibleForTesting
     static class QuiesceableContext implements OperatorCoordinator.Context {
@@ -290,21 +295,15 @@ public class RecreateOnResetOperatorCoordinator implements OperatorCoordinator {
     }
 
     /**
-     * A class that helps realize the fully async {@link #resetToCheckpoint(long, byte[])} behavior.
-     * The class wraps an {@link OperatorCoordinator} instance. It is going to be accessed by two
-     * different thread: the scheduler thread and the closing thread created in {@link
-     * #closeAsync(long)}. A DeferrableCoordinator could be in three states:
+     * 一个帮助类，用于实现完全异步的 {@link #resetToCheckpoint(long, byte[])} 行为。
+     * 该类包装了一个 {@link OperatorCoordinator} 实例。它将被两个不同的线程访问：
+     * 调度线程和在 {@link #closeAsync(long)} 中创建的关闭线程。
+     * DeferrableCoordinator 可以处于三种状态：
      *
      * <ul>
-     *   <li><b>deferred:</b> The internal {@link OperatorCoordinator} has not been created and all
-     *       the method calls to the RecreateOnResetOperatorCoordinator are added to a Queue.
-     *   <li><b>catching up:</b> The internal {@link OperatorCoordinator} has been created and is
-     *       processing the queued up method calls. In this state, all the method calls to the
-     *       RecreateOnResetOperatorCoordinator are still going to be enqueued to ensure the correct
-     *       execution order.
-     *   <li><b>caught up:</b> The internal {@link OperatorCoordinator} has finished processing all
-     *       the queued up method calls. From this point on, the method calls to this coordinator
-     *       will be executed in the caller thread directly instead of being put into the queue.
+     *   <li><b>挂起：</b> 内部 {@link OperatorCoordinator} 尚未创建，所有对 RecreateOnResetOperatorCoordinator 的方法调用都被添加到队列中。
+     *   <li><b>追赶：</b> 内部 {@link OperatorCoordinator} 已经创建并正在处理挂起的方法调用。在这种状态下，所有对 RecreateOnResetOperatorCoordinator 的方法调用仍然会被入队，以确保正确的执行顺序。
+     *   <li><b>追赶完成：</b> 内部 {@link OperatorCoordinator} 已经处理完所有挂起的方法调用。从这一点开始，对协调器的方法调用将直接在调用线程中执行，而不是被放入队列。
      * </ul>
      */
     private static class DeferrableCoordinator {
@@ -328,7 +327,6 @@ public class RecreateOnResetOperatorCoordinator implements OperatorCoordinator {
                 String name, ThrowingConsumer<OperatorCoordinator, T> call) throws T {
             synchronized (this) {
                 if (hasCaughtUp) {
-                    // The new coordinator has caught up.
                     call.accept(internalCoordinator);
                 } else {
                     pendingCalls.add(new NamedCall(name, call));
@@ -341,10 +339,6 @@ public class RecreateOnResetOperatorCoordinator implements OperatorCoordinator {
             if (closed) {
                 return;
             }
-            // Create a new internal coordinator and a new quiesceable context.
-            // We assume that the coordinator creation is fast. Otherwise the creation
-            // of the new internal coordinator may block the applyCall() method
-            // which is invoked in the scheduler main thread.
             try {
                 internalQuiesceableContext = new QuiesceableContext(context);
                 internalCoordinator = provider.getCoordinator(internalQuiesceableContext);
@@ -360,9 +354,9 @@ public class RecreateOnResetOperatorCoordinator implements OperatorCoordinator {
                 internalQuiesceableContext.quiesce();
                 pendingCalls.clear();
                 return closeAsyncWithTimeout(
-                                "SourceCoordinator for " + operatorId,
-                                (ThrowingRunnable<Exception>) internalCoordinator::close,
-                                Duration.ofMillis(timeoutMs))
+                        "SourceCoordinator for " + operatorId,
+                        (ThrowingRunnable<Exception>) internalCoordinator::close,
+                        Duration.ofMillis(timeoutMs))
                         .exceptionally(
                                 e -> {
                                     cleanAndFailJob(e);
@@ -388,9 +382,6 @@ public class RecreateOnResetOperatorCoordinator implements OperatorCoordinator {
                         }
                     }
                     synchronized (this) {
-                        // We need to check the pending calls queue again in case a new
-                        // pending call is added after we process the last one and before
-                        // we grab the lock.
                         if (pendingCalls.isEmpty()) {
                             hasCaughtUp = true;
                         }
@@ -416,8 +407,6 @@ public class RecreateOnResetOperatorCoordinator implements OperatorCoordinator {
             }
             try {
                 internalCoordinator.resetToCheckpoint(checkpointId, checkpointData);
-                // Start the new coordinator if this coordinator has been started before reset to
-                // the checkpoint.
                 if (started) {
                     internalCoordinator.start();
                 }
@@ -428,7 +417,6 @@ public class RecreateOnResetOperatorCoordinator implements OperatorCoordinator {
         }
 
         private void cleanAndFailJob(Throwable t) {
-            // Don't repeatedly fail the job.
             if (!failed) {
                 failed = true;
                 internalQuiesceableContext.getContext().failJob(t);

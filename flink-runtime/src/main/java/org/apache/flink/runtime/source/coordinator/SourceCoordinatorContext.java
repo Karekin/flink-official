@@ -77,25 +77,33 @@ import java.util.function.Supplier;
 import static org.apache.flink.runtime.operators.coordination.ComponentClosingUtils.shutdownExecutorForcefully;
 import static org.apache.flink.util.Preconditions.checkState;
 
+import java.util.Map;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiFunction;
+import java.util.function.BiPredicate;
+import java.util.function.Function;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
+
 /**
- * A context class for the {@link OperatorCoordinator}. Compared with {@link SplitEnumeratorContext}
- * this class allows interaction with state and sending {@link OperatorEvent} to the SourceOperator
- * while {@link SplitEnumeratorContext} only allows sending {@link SourceEvent}.
+ * 为 {@link OperatorCoordinator} 提供上下文的类。与 {@link SplitEnumeratorContext} 相比，该类允许与状态交互，并向 SourceOperator 发送 {@link OperatorEvent}。
+ * 而 {@link SplitEnumeratorContext} 仅允许发送 {@link SourceEvent}。
  *
- * <p>The context serves a few purposes:
+ * <p>上下文主要服务于以下目的：
  *
  * <ul>
- *   <li>Information provider - The context provides necessary information to the enumerator for it
- *       to know what is the status of the source readers and their split assignments. These
- *       information allows the split enumerator to do the coordination.
- *   <li>Action taker - The context also provides a few actions that the enumerator can take to
- *       carry out the coordination. So far there are two actions: 1) assign splits to the source
- *       readers. and 2) sens a custom {@link SourceEvent SourceEvents} to the source readers.
- *   <li>Thread model enforcement - The context ensures that all the manipulations to the
- *       coordinator state are handled by the same thread.
+ *   <li>信息提供者 - 上下文为枚举器提供了必要的信息，使其了解 SourceOperator 的状态以及它们的分片分配情况。
+ *       这些信息使分片枚举器能够进行协调工作。
+ *   <li>行动执行者 - 上下文还为枚举器提供了一些可以执行的行动，以进行协调工作。到目前为止，主要有两个行动：
+ *          1）向 SourceOperator 分配分片，2）向 SourceOperator 发送自定义的 {@link SourceEvent SourceEvents}。
+ *   <li>线程模型强制执行 - 上下文确保所有对协调器状态的操作都由同一个线程处理。
  * </ul>
  *
- * @param <SplitT> the type of the splits.
+ * @param <SplitT> 分片的类型。
  */
 @Internal
 public class SourceCoordinatorContext<SplitT extends SourceSplit>
@@ -103,22 +111,30 @@ public class SourceCoordinatorContext<SplitT extends SourceSplit>
 
     private static final Logger LOG = LoggerFactory.getLogger(SourceCoordinatorContext.class);
 
-    private final ScheduledExecutorService workerExecutor;
-    private final ScheduledExecutorService coordinatorExecutor;
-    private final ExecutorNotifier notifier;
-    private final OperatorCoordinator.Context operatorCoordinatorContext;
-    private final SimpleVersionedSerializer<SplitT> splitSerializer;
-    private final ConcurrentMap<Integer, ConcurrentMap<Integer, ReaderInfo>> registeredReaders;
-    private final SplitAssignmentTracker<SplitT> assignmentTracker;
-    private final SourceCoordinatorProvider.CoordinatorExecutorThreadFactory
-            coordinatorThreadFactory;
-    private SubtaskGateways subtaskGateways;
-    private final String coordinatorThreadName;
-    private final boolean supportsConcurrentExecutionAttempts;
-    private boolean[] subtaskHasNoMoreSplits;
-    private volatile boolean closed;
-    private volatile TernaryBoolean backlog = TernaryBoolean.UNDEFINED;
+    private final ScheduledExecutorService workerExecutor; // 用于执行 worker 线程任务的线程池
+    private final ScheduledExecutorService coordinatorExecutor; // 用于执行协调器线程任务的线程池
+    private final ExecutorNotifier notifier; // 用于通知任务执行状态，并处理线程中的异常
+    private final OperatorCoordinator.Context operatorCoordinatorContext; // 提供上下文信息，与 OperatorCoordinator 相关
+    private final SimpleVersionedSerializer<SplitT> splitSerializer; // 用于序列化和反序列化 SplitT 类型的数据
+    private final ConcurrentMap<Integer, ConcurrentMap<Integer, ReaderInfo>> registeredReaders; // 存储已注册的 SourceOperator 信息，按子任务 ID 和尝试编号进行索引
+    private final SplitAssignmentTracker<SplitT> assignmentTracker; // 跟踪数据分片的分配状态
+    private final SourceCoordinatorProvider.CoordinatorExecutorThreadFactory coordinatorThreadFactory; // 线程工厂，用于创建和管理协调器线程
+    private SubtaskGateways subtaskGateways; // 维护不同子任务的网关信息
+    private final String coordinatorThreadName; // 协调器线程的名称
+    private final boolean supportsConcurrentExecutionAttempts; // 是否支持并发执行尝试
+    private boolean[] subtaskHasNoMoreSplits; // 存储子任务是否已经处理完所有分片
+    private volatile boolean closed; // 标记上下文是否已关闭
+    private volatile TernaryBoolean backlog = TernaryBoolean.UNDEFINED; // 标记是否正在处理积压数据
 
+    /**
+     * 构造函数，初始化 SourceCoordinatorContext。
+     *
+     * @param coordinatorThreadFactory 线程工厂，用于创建协调器线程。
+     * @param numWorkerThreads 工作线程的数量。
+     * @param operatorCoordinatorContext 与 OperatorCoordinator 相关的上下文。
+     * @param splitSerializer 用于序列化和反序列化 SplitT 类型的数据。
+     * @param supportsConcurrentExecutionAttempts 是否支持并发执行尝试。
+     */
     public SourceCoordinatorContext(
             SourceCoordinatorProvider.CoordinatorExecutorThreadFactory coordinatorThreadFactory,
             int numWorkerThreads,
@@ -138,7 +154,17 @@ public class SourceCoordinatorContext<SplitT extends SourceSplit>
                 supportsConcurrentExecutionAttempts);
     }
 
-    // Package private method for unit test.
+    /**
+     * 用于单元测试的包私有构造函数。
+     *
+     * @param coordinatorExecutor 协调器线程池。
+     * @param workerExecutor 工作线程池。
+     * @param coordinatorThreadFactory 线程工厂，用于创建协调器线程。
+     * @param operatorCoordinatorContext 与 OperatorCoordinator 相关的上下文。
+     * @param splitSerializer 用于序列化和反序列化 SplitT 类型的数据。
+     * @param splitAssignmentTracker 跟踪数据分片分配状态的对象。
+     * @param supportsConcurrentExecutionAttempts 是否支持并发执行尝试。
+     */
     @VisibleForTesting
     SourceCoordinatorContext(
             ScheduledExecutorService coordinatorExecutor,
@@ -158,27 +184,36 @@ public class SourceCoordinatorContext<SplitT extends SourceSplit>
         this.coordinatorThreadName = coordinatorThreadFactory.getCoordinatorThreadName();
         this.supportsConcurrentExecutionAttempts = supportsConcurrentExecutionAttempts;
 
+        // 创建一个错误处理的协调器线程
         final Executor errorHandlingCoordinatorExecutor =
                 (runnable) ->
                         coordinatorExecutor.execute(
                                 new ThrowableCatchingRunnable(
                                         this::handleUncaughtExceptionFromAsyncCall, runnable));
 
-        this.notifier = new ExecutorNotifier(workerExecutor, errorHandlingCoordinatorExecutor);
+        this.notifier =
+                new ExecutorNotifier(workerExecutor, errorHandlingCoordinatorExecutor); // 初始化通知器
     }
 
+    /**
+     * 检查是否支持并发执行尝试。
+     *
+     * @return 如果支持并发执行尝试，返回 true；否则返回 false。
+     */
     boolean isConcurrentExecutionAttemptsSupported() {
         return supportsConcurrentExecutionAttempts;
     }
 
     @Override
     public SplitEnumeratorMetricGroup metricGroup() {
-        return new InternalSplitEnumeratorMetricGroup(operatorCoordinatorContext.metricGroup());
+        return new InternalSplitEnumeratorMetricGroup(
+                operatorCoordinatorContext.metricGroup()); // 返回内部的分片枚举器指标组
     }
 
     @Override
     public void sendEventToSourceReader(int subtaskId, SourceEvent event) {
         checkAndLazyInitialize();
+        // 检查是否支持并发执行尝试，如果不支持，则抛出异常
         checkState(
                 !supportsConcurrentExecutionAttempts,
                 "The split enumerator must invoke SplitEnumeratorContext"
@@ -186,16 +221,17 @@ public class SourceCoordinatorContext<SplitT extends SourceSplit>
                         + "SplitEnumeratorContext#sendEventToSourceReader(int, SourceEvent) "
                         + "to send custom source events in concurrent execution attempts scenario "
                         + "(e.g. if speculative execution is enabled).");
-        checkSubtaskIndex(subtaskId);
+        checkSubtaskIndex(subtaskId); // 检查子任务索引是否有效
 
+        // 在协调器线程中调用 lambda 表达式
         callInCoordinatorThread(
                 () -> {
                     final OperatorCoordinator.SubtaskGateway gateway =
-                            subtaskGateways.getOnlyGatewayAndCheckReady(subtaskId);
-                    gateway.sendEvent(new SourceEventWrapper(event));
+                            subtaskGateways.getOnlyGatewayAndCheckReady(subtaskId); // 获取子任务的网关
+                    gateway.sendEvent(new SourceEventWrapper(event)); // 向子任务发送事件
                     return null;
                 },
-                String.format("Failed to send event %s to subtask %d", event, subtaskId));
+                String.format("Failed to send event %s to subtask %d", event, subtaskId)); // 如果失败，记录错误信息
     }
 
     @Override
@@ -206,13 +242,13 @@ public class SourceCoordinatorContext<SplitT extends SourceSplit>
         callInCoordinatorThread(
                 () -> {
                     final OperatorCoordinator.SubtaskGateway gateway =
-                            subtaskGateways.getGatewayAndCheckReady(subtaskId, attemptNumber);
-                    gateway.sendEvent(new SourceEventWrapper(event));
+                            subtaskGateways.getGatewayAndCheckReady(subtaskId, attemptNumber); // 获取特定尝试的子任务网关
+                    gateway.sendEvent(new SourceEventWrapper(event)); // 向子任务发送事件
                     return null;
                 },
                 String.format(
                         "Failed to send event %s to subtask %d (#%d)",
-                        event, subtaskId, attemptNumber));
+                        event, subtaskId, attemptNumber)); // 如果失败，记录错误信息
     }
 
     void sendEventToSourceOperator(int subtaskId, OperatorEvent event) {
@@ -222,8 +258,8 @@ public class SourceCoordinatorContext<SplitT extends SourceSplit>
         callInCoordinatorThread(
                 () -> {
                     final OperatorCoordinator.SubtaskGateway gateway =
-                            subtaskGateways.getOnlyGatewayAndCheckReady(subtaskId);
-                    gateway.sendEvent(event);
+                            subtaskGateways.getOnlyGatewayAndCheckReady(subtaskId); // 获取子任务的网关
+                    gateway.sendEvent(event); // 向子任务发送操作事件
                     return null;
                 },
                 String.format("Failed to send event %s to subtask %d", event, subtaskId));
@@ -236,9 +272,9 @@ public class SourceCoordinatorContext<SplitT extends SourceSplit>
         callInCoordinatorThread(
                 () -> {
                     final OperatorCoordinator.SubtaskGateway gateway =
-                            subtaskGateways.getOnlyGatewayAndNotCheckReady(subtaskId);
+                            subtaskGateways.getOnlyGatewayAndNotCheckReady(subtaskId); // 获取子任务的网关
                     if (gateway != null) {
-                        gateway.sendEvent(event);
+                        gateway.sendEvent(event); // 如果网关存在，发送操作事件
                     }
 
                     return null;
@@ -248,38 +284,39 @@ public class SourceCoordinatorContext<SplitT extends SourceSplit>
 
     @Override
     public int currentParallelism() {
-        return operatorCoordinatorContext.currentParallelism();
+        return operatorCoordinatorContext.currentParallelism(); // 返回当前并行度
     }
 
     @Override
     public Map<Integer, ReaderInfo> registeredReaders() {
         final Map<Integer, ReaderInfo> readers = new HashMap<>();
-        for (Map.Entry<Integer, ConcurrentMap<Integer, ReaderInfo>> entry :
-                registeredReaders.entrySet()) {
+        // 遍历已注册的读者信息
+        for (Map.Entry<Integer, ConcurrentMap<Integer, ReaderInfo>> entry : registeredReaders.entrySet()) {
             final int subtaskIndex = entry.getKey();
             final Map<Integer, ReaderInfo> attemptReaders = entry.getValue();
             int earliestAttempt = Integer.MAX_VALUE;
+            // 寻找最早的尝试编号
             for (int attemptNumber : attemptReaders.keySet()) {
                 if (attemptNumber < earliestAttempt) {
                     earliestAttempt = attemptNumber;
                 }
             }
-            readers.put(subtaskIndex, attemptReaders.get(earliestAttempt));
+            readers.put(subtaskIndex, attemptReaders.get(earliestAttempt)); // 保存最早的尝试的读者信息
         }
-        return Collections.unmodifiableMap(readers);
+        return Collections.unmodifiableMap(readers); // 返回不可修改的读者信息
     }
 
     @Override
     public Map<Integer, Map<Integer, ReaderInfo>> registeredReadersOfAttempts() {
-        return Collections.unmodifiableMap(registeredReaders);
+        return Collections.unmodifiableMap(registeredReaders); // 返回不可修改的读者尝试信息
     }
 
     @Override
     public void assignSplits(SplitsAssignment<SplitT> assignment) {
-        // Ensure the split assignment is done by the coordinator executor.
+        // 确保分片分配在协调器线程中执行
         callInCoordinatorThread(
                 () -> {
-                    // Ensure all the subtasks in the assignment have registered.
+                    // 确保分配中的所有子任务都已注册
                     assignment
                             .assignment()
                             .forEach(
@@ -292,448 +329,445 @@ public class SourceCoordinatorContext<SplitT extends SourceSplit>
                                         }
                                     });
 
-                    assignmentTracker.recordSplitAssignment(assignment);
-                    assignSplitsToAttempts(assignment);
+                    assignmentTracker.recordSplitAssignment(assignment); // 记录分片分配
+                    assignSplitsToAttempts(assignment); // 向尝试分配分片
                     return null;
                 },
-                String.format("Failed to assign splits %s due to ", assignment));
+                String.format("Failed to assign splits %s due to ", assignment)); // 如果失败，记录错误信息
     }
 
     @Override
     public void signalNoMoreSplits(int subtask) {
         checkSubtaskIndex(subtask);
 
-        // Ensure the split assignment is done by the coordinator executor.
         callInCoordinatorThread(
                 () -> {
-                    subtaskHasNoMoreSplits[subtask] = true;
-                    signalNoMoreSplitsToAttempts(subtask);
-                    return null; // void return value
+                    subtaskHasNoMoreSplits[subtask] = true; // 标记子任务已无更多分片
+                    signalNoMoreSplitsToAttempts(subtask); // 向所有尝试发送无更多分片信号
+                    return null;
                 },
-                "Failed to send 'NoMoreSplits' to reader " + subtask);
+                "Failed to send 'NoMoreSplits' to reader " + subtask); // 如果失败，记录错误信息
     }
 
     @Override
     public void signalIntermediateNoMoreSplits(int subtask) {
         checkSubtaskIndex(subtask);
 
-        // It's an intermediate noMoreSplit event, notify subtask to deal with this event.
         callInCoordinatorThread(
                 () -> {
-                    signalNoMoreSplitsToAttempts(subtask);
+                    signalNoMoreSplitsToAttempts(subtask); // 向所有尝试发送中间无更多分片信号
                     return null;
                 },
-                "Failed to send 'IntermediateNoMoreSplits' to reader " + subtask);
+                "Failed to send 'IntermediateNoMoreSplits' to reader " + subtask); // 如果失败，记录错误信息
     }
 
     @Override
-    public <T> void callAsync(
-            Callable<T> callable,
-            BiConsumer<T, Throwable> handler,
-            long initialDelay,
-            long period) {
-        notifier.notifyReadyAsync(callable, handler, initialDelay, period);
+    public <T> void callAsync(Callable<T> callable, BiConsumer<T, Throwable> handler, long initialDelay, long period) {
+        notifier.notifyReadyAsync(callable, handler, initialDelay, period); // 异步调用并通知结果
     }
 
     @Override
     public <T> void callAsync(Callable<T> callable, BiConsumer<T, Throwable> handler) {
-        notifier.notifyReadyAsync(callable, handler);
+        notifier.notifyReadyAsync(callable, handler); // 异步调用并通知结果
     }
 
-    /** {@inheritDoc} If the runnable throws an Exception, the corresponding job is failed. */
+    /**
+     * 在协调器线程中运行 Runnable。
+     *
+     * @param runnable 要运行的 Runnable。
+     */
     @Override
     public void runInCoordinatorThread(Runnable runnable) {
-        // when using a ScheduledThreadPool, uncaught exception handler catches only
-        // exceptions thrown by the threadPool, so manually call it when the exception is
-        // thrown by the runnable
+        // 当使用 ScheduledThreadPool 时，未捕获的异常处理器会捕获线程池中的异常，所以需要手动调用它
         coordinatorExecutor.execute(
                 new ThrowableCatchingRunnable(
                         throwable ->
-                                coordinatorThreadFactory.uncaughtException(
-                                        Thread.currentThread(), throwable),
+                                coordinatorThreadFactory.uncaughtException(Thread.currentThread(), throwable),
                         runnable));
     }
 
     @Override
     public void close() throws InterruptedException {
         closed = true;
-        // Close quietly so the closing sequence will be executed completely.
+        // 安全关闭线程池，确保关闭序列完全执行
         shutdownExecutorForcefully(workerExecutor, Duration.ofNanos(Long.MAX_VALUE));
         shutdownExecutorForcefully(coordinatorExecutor, Duration.ofNanos(Long.MAX_VALUE));
     }
 
     @VisibleForTesting
     boolean isClosed() {
-        return closed;
+        return closed; // 返回是否已关闭
     }
 
     @Override
     public void setIsProcessingBacklog(boolean isProcessingBacklog) {
         CheckpointCoordinator checkpointCoordinator =
-                getCoordinatorContext().getCheckpointCoordinator();
-        OperatorID operatorID = getCoordinatorContext().getOperatorId();
+                getCoordinatorContext().getCheckpointCoordinator(); // 获取 CheckpointCoordinator
+        OperatorID operatorID = getCoordinatorContext().getOperatorId(); // 获取操作算子 ID
         if (checkpointCoordinator != null) {
-            checkpointCoordinator.setIsProcessingBacklog(operatorID, isProcessingBacklog);
+            checkpointCoordinator.setIsProcessingBacklog(operatorID, isProcessingBacklog); // 设置是否正在处理积压数据
         }
-        backlog = TernaryBoolean.fromBoolean(isProcessingBacklog);
+        backlog = TernaryBoolean.fromBoolean(isProcessingBacklog); // 更新积压状态
         callInCoordinatorThread(
                 () -> {
                     final IsProcessingBacklogEvent isProcessingBacklogEvent =
-                            new IsProcessingBacklogEvent(isProcessingBacklog);
+                            new IsProcessingBacklogEvent(isProcessingBacklog); // 创建积压事件
                     for (int i = 0; i < getCoordinatorContext().currentParallelism(); i++) {
-                        sendEventToSourceOperatorIfTaskReady(i, isProcessingBacklogEvent);
+                        sendEventToSourceOperatorIfTaskReady(i, isProcessingBacklogEvent); // 向源操作者发送事件
                     }
                     return null;
                 },
-                "Failed to send BacklogEvent to reader.");
+                "Failed to send BacklogEvent to reader."); // 如果失败，记录错误信息
     }
 
-    // --------- Package private additional methods for the SourceCoordinator ------------
+    // 包私有方法，用于 SourceCoordinator
 
     void attemptReady(OperatorCoordinator.SubtaskGateway gateway) {
         checkAndLazyInitialize();
-        checkState(coordinatorThreadFactory.isCurrentThreadCoordinatorThread());
+        checkState(coordinatorThreadFactory.isCurrentThreadCoordinatorThread()); // 检查当前线程是否是协调器线程
 
-        subtaskGateways.registerSubtaskGateway(gateway);
+        subtaskGateways.registerSubtaskGateway(gateway); // 注册子任务网关
     }
 
     void attemptFailed(int subtaskIndex, int attemptNumber) {
         checkAndLazyInitialize();
-        checkState(coordinatorThreadFactory.isCurrentThreadCoordinatorThread());
+        checkState(coordinatorThreadFactory.isCurrentThreadCoordinatorThread()); // 检查当前线程是否是协调器线程
 
-        subtaskGateways.unregisterSubtaskGateway(subtaskIndex, attemptNumber);
+        subtaskGateways.unregisterSubtaskGateway(subtaskIndex, attemptNumber); // 注销子任务网关
     }
 
     void subtaskReset(int subtaskIndex) {
         checkAndLazyInitialize();
-        checkState(coordinatorThreadFactory.isCurrentThreadCoordinatorThread());
+        checkState(coordinatorThreadFactory.isCurrentThreadCoordinatorThread()); // 检查当前线程是否是协调器线程
 
-        subtaskGateways.reset(subtaskIndex);
-        registeredReaders.remove(subtaskIndex);
-        subtaskHasNoMoreSplits[subtaskIndex] = false;
+        subtaskGateways.reset(subtaskIndex); // 重置子任务网关
+        registeredReaders.remove(subtaskIndex); // 移除已注册的读者信息
+        subtaskHasNoMoreSplits[subtaskIndex] = false; // 重置子任务无更多分片标志
     }
 
     boolean hasNoMoreSplits(int subtaskIndex) {
         checkAndLazyInitialize();
-        return subtaskHasNoMoreSplits[subtaskIndex];
+        return subtaskHasNoMoreSplits[subtaskIndex]; // 返回子任务是否已无更多分片
     }
 
     /**
-     * Fail the job with the given cause.
+     * 用给定的原因失败作业。
      *
-     * @param cause the cause of the job failure.
+     * @param cause 失败的原因。
      */
     void failJob(Throwable cause) {
-        operatorCoordinatorContext.failJob(cause);
+        operatorCoordinatorContext.failJob(cause); // 触发 Job 失败
     }
 
     void handleUncaughtExceptionFromAsyncCall(Throwable t) {
         if (closed) {
-            return;
+            return; // 如果已关闭，直接返回
         }
 
-        ExceptionUtils.rethrowIfFatalErrorOrOOM(t);
+        ExceptionUtils.rethrowIfFatalErrorOrOOM(t); // 如果是致命错误或 OOM，重新抛出异常
         LOG.error(
                 "Exception while handling result from async call in {}. Triggering job failover.",
                 coordinatorThreadName,
-                t);
-        failJob(t);
+                t); // 记录错误日志
+        failJob(t); // 触发 Job 失败
     }
 
     /**
-     * Behavior of SourceCoordinatorContext on checkpoint.
+     * 处理 SourceCoordinatorContext 的检查点行为。
      *
-     * @param checkpointId The id of the ongoing checkpoint.
+     * @param checkpointId 检查点 ID。
      */
     void onCheckpoint(long checkpointId) throws Exception {
-        assignmentTracker.onCheckpoint(checkpointId);
+        assignmentTracker.onCheckpoint(checkpointId); // 在检查点期间更新分配跟踪状态
     }
 
     /**
-     * Register a source reader.
+     * 注册 SourceOperator 。
      *
-     * @param subtaskId the subtask id of the source reader.
-     * @param attemptNumber the attempt number of the source reader.
-     * @param location the location of the source reader.
+     * @param subtaskId 子任务 ID。
+     * @param attemptNumber 尝试编号。
+     * @param location 子任务的位置。
      */
     void registerSourceReader(int subtaskId, int attemptNumber, String location) {
         final Map<Integer, ReaderInfo> attemptReaders =
-                registeredReaders.computeIfAbsent(subtaskId, k -> new ConcurrentHashMap<>());
+                registeredReaders.computeIfAbsent(
+                        subtaskId, k -> new ConcurrentHashMap<>()); // 获取或创建尝试读者信息
         checkState(
                 !attemptReaders.containsKey(attemptNumber),
                 "ReaderInfo of subtask %s (#%s) already exists.",
                 subtaskId,
-                attemptNumber);
-        attemptReaders.put(attemptNumber, new ReaderInfo(subtaskId, location));
+                attemptNumber); // 检查尝试读者是否已存在
+        attemptReaders.put(attemptNumber, new ReaderInfo(subtaskId, location)); // 注册读者信息
 
-        sendCachedSplitsToNewlyRegisteredReader(subtaskId, attemptNumber);
+        sendCachedSplitsToNewlyRegisteredReader(subtaskId, attemptNumber); // 向新注册的读者发送缓存的分片
     }
 
     /**
-     * Unregister a source reader.
+     * 注销 SourceOperator 。
      *
-     * @param subtaskId the subtask id of the source reader.
-     * @param attemptNumber the attempt number of the source reader.
+     * @param subtaskId 子任务 ID。
+     * @param attemptNumber 尝试编号。
      */
     void unregisterSourceReader(int subtaskId, int attemptNumber) {
-        final Map<Integer, ReaderInfo> attemptReaders = registeredReaders.get(subtaskId);
+        final Map<Integer, ReaderInfo> attemptReaders = registeredReaders.get(subtaskId); // 获取尝试读者信息
         if (attemptReaders != null) {
-            attemptReaders.remove(attemptNumber);
-
+            attemptReaders.remove(attemptNumber); // 移除读者信息
             if (attemptReaders.isEmpty()) {
-                registeredReaders.remove(subtaskId);
+                registeredReaders.remove(subtaskId); // 如果尝试为空，移除子任务信息
             }
         }
     }
 
     /**
-     * Get the split to put back. This only happens when a source reader subtask has failed.
+     * 获取并移除未检查点分配的分片。
      *
-     * @param subtaskId the failed subtask id.
-     * @param restoredCheckpointId the checkpoint that the task is recovered to.
-     * @return A list of splits that needs to be added back to the {@link SplitEnumerator}.
+     * @param subtaskId 子任务 ID。
+     * @param restoredCheckpointId 恢复的检查点 ID。
+     * @return 需要重新分配的分片列表。
      */
     List<SplitT> getAndRemoveUncheckpointedAssignment(int subtaskId, long restoredCheckpointId) {
         return assignmentTracker.getAndRemoveUncheckpointedAssignment(
-                subtaskId, restoredCheckpointId);
+                subtaskId, restoredCheckpointId); // 获取并移除未检查点分配的分片
     }
 
     /**
-     * Invoked when a successful checkpoint has been taken.
+     * 处理成功检查点。
      *
-     * @param checkpointId the id of the successful checkpoint.
+     * @param checkpointId 成功的检查点 ID。
      */
     void onCheckpointComplete(long checkpointId) {
-        assignmentTracker.onCheckpointComplete(checkpointId);
+        assignmentTracker.onCheckpointComplete(checkpointId); // 更新检查点完成后的分配状态
     }
 
     OperatorCoordinator.Context getCoordinatorContext() {
-        return operatorCoordinatorContext;
+        return operatorCoordinatorContext; // 返回与 OperatorCoordinator 相关的上下文
     }
 
-    // ---------------- Executor methods to avoid use coordinatorExecutor directly -----------------
+    // 执行器相关方法
 
     Future<?> submitTask(Runnable task) {
-        return coordinatorExecutor.submit(task);
+        return coordinatorExecutor.submit(task); // 提交任务并返回 Future
     }
 
-    /** To avoid period task lost, we should handle the potential exception throw by task. */
     ScheduledFuture<?> schedulePeriodTask(
             Runnable command, long initDelay, long period, TimeUnit unit) {
         return coordinatorExecutor.scheduleAtFixedRate(
                 () -> {
                     try {
-                        command.run();
+                        command.run(); // 执行任务
                     } catch (Throwable t) {
-                        handleUncaughtExceptionFromAsyncCall(t);
+                        handleUncaughtExceptionFromAsyncCall(t); // 处理未捕获的异常
                     }
                 },
                 initDelay,
                 period,
-                unit);
+                unit); // 定期执行任务
     }
 
     CompletableFuture<?> supplyAsync(Supplier<?> task) {
-        return CompletableFuture.supplyAsync(task, coordinatorExecutor);
+        return CompletableFuture.supplyAsync(task, coordinatorExecutor); // 异步执行任务并返回 CompletableFuture
     }
 
-    // ---------------- private helper methods -----------------
+    // 私有辅助方法
 
     private void checkSubtaskIndex(int subtaskIndex) {
         if (subtaskIndex < 0 || subtaskIndex >= getCoordinatorContext().currentParallelism()) {
             throw new IllegalArgumentException(
                     String.format(
                             "Subtask index %d is out of bounds [0, %s)",
-                            subtaskIndex, getCoordinatorContext().currentParallelism()));
+                            subtaskIndex, getCoordinatorContext().currentParallelism())); // 检查子任务索引是否有效
         }
     }
 
     private void checkAndLazyInitialize() {
         if (subtaskGateways == null) {
             final int parallelism = operatorCoordinatorContext.currentParallelism();
-            checkState(parallelism != ExecutionConfig.PARALLELISM_DEFAULT);
-            this.subtaskGateways = new SubtaskGateways(parallelism);
-            this.subtaskHasNoMoreSplits = new boolean[parallelism];
+            checkState(
+                    parallelism != ExecutionConfig.PARALLELISM_DEFAULT,
+                    "Parallelism must be set"); // 检查并行度是否已设置
+            this.subtaskGateways = new SubtaskGateways(parallelism); // 初始化子任务网关
+            this.subtaskHasNoMoreSplits = new boolean[parallelism]; // 初始化无更多分片标志数组
             Arrays.fill(subtaskHasNoMoreSplits, false);
         }
     }
 
     /**
-     * A helper method that delegates the callable to the coordinator thread if the current thread
-     * is not the coordinator thread, otherwise call the callable right away.
+     * 调用方法时委托给协调器线程，如果当前线程不是协调器线程，则在协调器线程中执行；否则直接执行。
      *
-     * @param callable the callable to delegate.
+     * @param callable 要调用的 Callable。
+     * @param errorMessage 错误信息。
+     * @return 调用结果。
      */
     private <V> V callInCoordinatorThread(Callable<V> callable, String errorMessage) {
-        // Ensure the split assignment is done by the coordinator executor.
+        // 确保分片分配在协调器线程中执行
         if (!coordinatorThreadFactory.isCurrentThreadCoordinatorThread()) {
             try {
                 final Callable<V> guardedCallable =
                         () -> {
                             try {
-                                return callable.call();
+                                return callable.call(); // 调用 Callable
                             } catch (Throwable t) {
-                                LOG.error("Uncaught Exception in Source Coordinator Executor", t);
+                                LOG.error("Uncaught Exception in Source Coordinator Executor", t); // 记录未捕获的异常
                                 ExceptionUtils.rethrowException(t);
                                 return null;
                             }
                         };
 
-                return coordinatorExecutor.submit(guardedCallable).get();
+                return coordinatorExecutor.submit(guardedCallable).get(); // 提交任务并等待结果
             } catch (InterruptedException | ExecutionException e) {
-                throw new FlinkRuntimeException(errorMessage, e);
+                throw new FlinkRuntimeException(errorMessage, e); // 如果发生异常，抛出运行时异常
             }
         }
 
         try {
-            return callable.call();
+            return callable.call(); // 直接调用 Callable
         } catch (Throwable t) {
-            LOG.error("Uncaught Exception in Source Coordinator Executor", t);
-            throw new FlinkRuntimeException(errorMessage, t);
+            LOG.error("Uncaught Exception in Source Coordinator Executor", t); // 记录未捕获的异常
+            throw new FlinkRuntimeException(errorMessage, t); // 抛出运行时异常
         }
     }
 
     private void assignSplitsToAttempts(SplitsAssignment<SplitT> assignment) {
-        assignment.assignment().forEach((index, splits) -> assignSplitsToAttempts(index, splits));
+        assignment.assignment().forEach((index, splits) -> assignSplitsToAttempts(index, splits)); // 向所有尝试分配分片
     }
 
     private void assignSplitsToAttempts(int subtaskIndex, List<SplitT> splits) {
-        getRegisteredAttempts(subtaskIndex)
-                .forEach(attempt -> assignSplitsToAttempt(subtaskIndex, attempt, splits));
+        getRegisteredAttempts(subtaskIndex).forEach(
+                attempt -> assignSplitsToAttempt(subtaskIndex, attempt, splits)); // 向每个尝试分配分片
     }
 
     private void assignSplitsToAttempt(int subtaskIndex, int attemptNumber, List<SplitT> splits) {
         checkAndLazyInitialize();
         if (splits.isEmpty()) {
-            return;
+            return; // 如果没有分片，直接返回
         }
 
-        checkAttemptReaderReady(subtaskIndex, attemptNumber);
+        checkAttemptReaderReady(subtaskIndex, attemptNumber); // 检查尝试读者是否准备好
 
         final AddSplitEvent<SplitT> addSplitEvent;
         try {
-            addSplitEvent = new AddSplitEvent<>(splits, splitSerializer);
+            addSplitEvent = new AddSplitEvent<>(splits, splitSerializer); // 创建 AddSplitEvent
         } catch (IOException e) {
-            throw new FlinkRuntimeException("Failed to serialize splits.", e);
+            throw new FlinkRuntimeException("Failed to serialize splits.", e); // 如果序列化失败，抛出异常
         }
 
         final OperatorCoordinator.SubtaskGateway gateway =
-                subtaskGateways.getGatewayAndCheckReady(subtaskIndex, attemptNumber);
-        gateway.sendEvent(addSplitEvent);
+                subtaskGateways.getGatewayAndCheckReady(subtaskIndex, attemptNumber); // 获取子任务网关
+        gateway.sendEvent(addSplitEvent); // 向子任务发送分片
     }
 
     private void signalNoMoreSplitsToAttempts(int subtaskIndex) {
         getRegisteredAttempts(subtaskIndex)
-                .forEach(attemptNumber -> signalNoMoreSplitsToAttempt(subtaskIndex, attemptNumber));
+                .forEach(
+                        attemptNumber -> signalNoMoreSplitsToAttempt(subtaskIndex, attemptNumber)); // 向所有尝试发送无更多分片信号
     }
 
     private void signalNoMoreSplitsToAttempt(int subtaskIndex, int attemptNumber) {
         checkAndLazyInitialize();
-        checkAttemptReaderReady(subtaskIndex, attemptNumber);
+        checkAttemptReaderReady(subtaskIndex, attemptNumber); // 检查尝试读者是否准备好
 
         final OperatorCoordinator.SubtaskGateway gateway =
-                subtaskGateways.getGatewayAndCheckReady(subtaskIndex, attemptNumber);
-        gateway.sendEvent(new NoMoreSplitsEvent());
+                subtaskGateways.getGatewayAndCheckReady(subtaskIndex, attemptNumber); // 获取子任务网关
+        gateway.sendEvent(new NoMoreSplitsEvent()); // 向子任务发送无更多分片信号
     }
 
     private void checkAttemptReaderReady(int subtaskIndex, int attemptNumber) {
-        checkState(registeredReaders.containsKey(subtaskIndex));
-        checkState(getRegisteredAttempts(subtaskIndex).contains(attemptNumber));
+        checkState(registeredReaders.containsKey(subtaskIndex)); // 检查子任务是否已注册
+        checkState(getRegisteredAttempts(subtaskIndex).contains(attemptNumber)); // 检查尝试编号是否有效
     }
 
     private Set<Integer> getRegisteredAttempts(int subtaskIndex) {
-        return registeredReaders.get(subtaskIndex).keySet();
+        return registeredReaders.get(subtaskIndex).keySet(); // 获取已注册的尝试编号集合
     }
 
     private void sendCachedSplitsToNewlyRegisteredReader(int subtaskIndex, int attemptNumber) {
-        // For batch jobs, checkpoints will never happen so that the un-checkpointed assignments in
-        // assignmentTracker can be seen as cached splits. For streaming jobs,
-        // #supportsConcurrentExecutionAttempts should be false and un-checkpointed assignments
-        // should be empty when a new reader is registered (cleared when the last reader failed).
+        // 对于批处理作业，检查点永远不会发生，因此 assignmentTracker 中的 un-checkpointed 分配可以被视为缓存的分片。
+        // 对于流处理作业，supportsConcurrentExecutionAttempts 应该为 false，并且当新读者注册时，新读者未检查点的分配应该为空（当最后一个读者失败时被清除）。
         final LinkedHashSet<SplitT> cachedSplits =
-                assignmentTracker.uncheckpointedAssignments().get(subtaskIndex);
+                assignmentTracker.uncheckpointedAssignments().get(subtaskIndex); // 获取缓存的分片
 
         if (cachedSplits != null) {
             if (supportsConcurrentExecutionAttempts) {
-                assignSplitsToAttempt(subtaskIndex, attemptNumber, new ArrayList<>(cachedSplits));
+                assignSplitsToAttempt(
+                        subtaskIndex, attemptNumber, new ArrayList<>(cachedSplits)); // 向尝试分配缓存的分片
                 if (hasNoMoreSplits(subtaskIndex)) {
-                    signalNoMoreSplitsToAttempt(subtaskIndex, attemptNumber);
+                    signalNoMoreSplitsToAttempt(subtaskIndex, attemptNumber); // 发送无更多分片信号
                 }
             } else {
-                throw new IllegalStateException("No cached split is expected.");
+                throw new IllegalStateException("No cached split is expected."); // 如果不支持并发执行尝试，抛出异常
             }
         }
     }
 
     /**
-     * Returns whether the Source is processing backlog data. UNDEFINED is returned if it is not set
-     * by the {@link #setIsProcessingBacklog} method.
+     * 返回 Source 是否正在处理积压数据。如果未通过 {@link #setIsProcessingBacklog} 方法设置，则返回 UNDEFINED。
      */
     public TernaryBoolean isBacklog() {
-        return backlog;
+        return backlog; // 返回积压状态
     }
 
-    /** Maintains the subtask gateways for different execution attempts of different subtasks. */
+    /**
+     * 维护不同执行尝试的子任务的网关。
+     */
     private static class SubtaskGateways {
-        private final Map<Integer, OperatorCoordinator.SubtaskGateway>[] gateways;
+        private final Map<Integer, OperatorCoordinator.SubtaskGateway>[] gateways; // 存储子任务网关
 
         private SubtaskGateways(int parallelism) {
-            gateways = new Map[parallelism];
+            gateways = new Map[parallelism]; // 初始化网关数组
             for (int i = 0; i < parallelism; i++) {
-                gateways[i] = new HashMap<>();
+                gateways[i] = new HashMap<>(); // 初始化每个子任务的网关
             }
         }
 
         private void registerSubtaskGateway(OperatorCoordinator.SubtaskGateway gateway) {
-            final int subtaskIndex = gateway.getSubtask();
-            final int attemptNumber = gateway.getExecution().getAttemptNumber();
+            final int subtaskIndex = gateway.getSubtask(); // 获取子任务索引
+            final int attemptNumber = gateway.getExecution().getAttemptNumber(); // 获取尝试编号
 
             checkState(
                     !gateways[subtaskIndex].containsKey(attemptNumber),
                     "Already have a subtask gateway for %s (#%s).",
                     subtaskIndex,
-                    attemptNumber);
-            gateways[subtaskIndex].put(attemptNumber, gateway);
+                    attemptNumber); // 检查是否已存在网关
+            gateways[subtaskIndex].put(attemptNumber, gateway); // 注册子任务网关
         }
 
         private void unregisterSubtaskGateway(int subtaskIndex, int attemptNumber) {
-            gateways[subtaskIndex].remove(attemptNumber);
+            gateways[subtaskIndex].remove(attemptNumber); // 注销子任务网关
         }
 
         private OperatorCoordinator.SubtaskGateway getOnlyGatewayAndCheckReady(int subtaskIndex) {
             checkState(
                     gateways[subtaskIndex].size() > 0,
                     "Subtask %s is not ready yet to receive events.",
-                    subtaskIndex);
+                    subtaskIndex); // 检查子任务是否准备好
 
-            return Iterables.getOnlyElement(gateways[subtaskIndex].values());
+            return Iterables.getOnlyElement(gateways[subtaskIndex].values()); // 获取唯一的网关
         }
 
-        private OperatorCoordinator.SubtaskGateway getOnlyGatewayAndNotCheckReady(
-                int subtaskIndex) {
+        private OperatorCoordinator.SubtaskGateway getOnlyGatewayAndNotCheckReady(int subtaskIndex) {
             if (gateways[subtaskIndex].size() > 0) {
-                return Iterables.getOnlyElement(gateways[subtaskIndex].values());
+                return Iterables.getOnlyElement(gateways[subtaskIndex].values()); // 获取唯一的网关
             } else {
-                return null;
+                return null; // 如果没有网关，返回 null
             }
         }
 
         private OperatorCoordinator.SubtaskGateway getGatewayAndCheckReady(
                 int subtaskIndex, int attemptNumber) {
             final OperatorCoordinator.SubtaskGateway gateway =
-                    gateways[subtaskIndex].get(attemptNumber);
+                    gateways[subtaskIndex].get(attemptNumber); // 获取指定尝试的网关
             if (gateway != null) {
-                return gateway;
+                return gateway; // 如果存在，返回网关
             }
 
             throw new IllegalStateException(
                     String.format(
                             "Subtask %d (#%d) is not ready yet to receive events.",
-                            subtaskIndex, attemptNumber));
+                            subtaskIndex, attemptNumber)); // 如果不存在，抛出异常
         }
 
         private void reset(int subtaskIndex) {
-            gateways[subtaskIndex].clear();
+            gateways[subtaskIndex].clear(); // 重置子任务网关
         }
     }
 }
