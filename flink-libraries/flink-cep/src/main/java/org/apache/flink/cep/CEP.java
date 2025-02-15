@@ -22,35 +22,37 @@ import org.apache.flink.cep.pattern.Pattern;
 import org.apache.flink.streaming.api.datastream.DataStream;
 
 /**
- * Utility class for complex event processing.
+ * 用于复杂事件处理的工具类。
  *
- * <p>Methods which transform a {@link DataStream} into a {@link PatternStream} to do CEP.
+ * <p>此类包含将 {@link DataStream} 转换为 {@link PatternStream} 以执行复杂事件处理（CEP）的方法。
  */
 public class CEP {
+
     /**
-     * Creates a {@link PatternStream} from an input data stream and a pattern.
+     * 从输入数据流和模式创建一个 {@link PatternStream}。
      *
-     * @param input DataStream containing the input events
-     * @param pattern Pattern specification which shall be detected
-     * @param <T> Type of the input events
-     * @return Resulting pattern stream
+     * @param input 包含输入事件的 DataStream
+     * @param pattern 要检测的模式规范
+     * @param <T> 输入事件的类型
+     * @return 生成的模式流
      */
     public static <T> PatternStream<T> pattern(DataStream<T> input, Pattern<T, ?> pattern) {
-        return new PatternStream<>(input, pattern);
+        return new PatternStream<>(input, pattern); // 创建一个新的 PatternStream 对象并返回
     }
 
     /**
-     * Creates a {@link PatternStream} from an input data stream and a pattern.
+     * 从输入数据流和模式创建一个 {@link PatternStream}，并提供一个比较器来排序具有相同时间戳的事件。
      *
-     * @param input DataStream containing the input events
-     * @param pattern Pattern specification which shall be detected
-     * @param comparator Comparator to sort events with equal timestamps
-     * @param <T> Type of the input events
-     * @return Resulting pattern stream
+     * @param input 包含输入事件的 DataStream
+     * @param pattern 要检测的模式规范
+     * @param comparator 用于排序具有相同时间戳事件的比较器
+     * @param <T> 输入事件的类型
+     * @return 生成的模式流，使用了自定义比较器
      */
     public static <T> PatternStream<T> pattern(
             DataStream<T> input, Pattern<T, ?> pattern, EventComparator<T> comparator) {
-        final PatternStream<T> stream = new PatternStream<>(input, pattern);
-        return stream.withComparator(comparator);
+        final PatternStream<T> stream = new PatternStream<>(input, pattern); // 创建一个新的 PatternStream 对象
+        return stream.withComparator(comparator); // 设置自定义的比较器并返回
     }
 }
+

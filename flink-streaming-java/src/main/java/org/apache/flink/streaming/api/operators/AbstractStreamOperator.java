@@ -730,6 +730,10 @@ public abstract class AbstractStreamOperator<OUT>
         stateHandler.setCurrentKey(key);  // 委托给状态处理器
     }
 
+    public Object getCurrentKey() {
+        return stateHandler.getCurrentKey();
+    }
+
 // ------------------------- 状态存储访问 -------------------------
 
     /**
