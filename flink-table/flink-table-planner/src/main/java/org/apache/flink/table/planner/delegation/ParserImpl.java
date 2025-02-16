@@ -54,20 +54,42 @@ import java.util.List;
 import java.util.Optional;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
-
-/** Implementation of {@link Parser} that uses Calcite. */
+/**
+ * {@link Parser} 的实现，使用 Calcite 进行 SQL 解析和校验。
+ *
+ * 该类主要负责：
+ * 1. 解析 SQL 语句，转换为 Flink 内部的操作（Operation）。
+ * 2. 校验 SQL 语句的正确性，并解析 SQL 表达式。
+ * 3. 提供 SQL 语法补全功能，以帮助用户更好地编写 SQL 查询。
+ *
+ * `ParserImpl` 使用了 Calcite 解析器（CalciteParser）和 Flink 校验器（FlinkPlannerImpl），
+ * 并结合了扩展解析器（ExtendedParser）以增强 SQL 解析能力。
+ */
 public class ParserImpl implements Parser {
 
+    // CatalogManager 负责管理数据库和表的元数据
     private final CatalogManager catalogManager;
 
-    // we use supplier pattern here in order to use the most up to
-    // date configuration. Users might change the parser configuration in a TableConfig in between
-    // multiple statements parsing
+    // 使用 Supplier 模式来动态获取 FlinkPlannerImpl，以便支持动态配置更新
     private final Supplier<FlinkPlannerImpl> validatorSupplier;
+
+    // 使用 Supplier 模式来动态获取 CalciteParser，以便支持动态配置更新
     private final Supplier<CalciteParser> calciteParserSupplier;
+
+    // 用于创建 SQL 到 RexNode（关系表达式）的转换器
     private final RexFactory rexFactory;
+
+    // Flink 扩展解析器，用于解析特定 SQL 语法
     private static final ExtendedParser EXTENDED_PARSER = ExtendedParser.INSTANCE;
 
+    /**
+     * 构造方法，初始化解析器。
+     *
+     * @param catalogManager        负责管理元数据（数据库、表等）。
+     * @param validatorSupplier     提供 Flink SQL 语法校验器实例的 Supplier。
+     * @param calciteParserSupplier 提供 Calcite SQL 解析器实例的 Supplier。
+     * @param rexFactory            负责将 SQL 解析为 RexNode 的工厂类。
+     */
     public ParserImpl(
             CatalogManager catalogManager,
             Supplier<FlinkPlannerImpl> validatorSupplier,
@@ -80,72 +102,91 @@ public class ParserImpl implements Parser {
     }
 
     /**
-     * When parsing statement, it first uses {@link ExtendedParser} to parse statements. If {@link
-     * ExtendedParser} fails to parse statement, it uses the {@link CalciteParser} to parse
-     * statements.
+     * 解析 SQL 语句并返回解析后的操作列表。
      *
-     * @param statement input statement.
-     * @return parsed operations.
+     * 解析逻辑：
+     * 1. 先尝试使用 {@link ExtendedParser} 解析 SQL 语句（支持 Flink 特定扩展）。
+     * 2. 如果扩展解析器无法解析，则使用 {@link CalciteParser} 解析标准 SQL 语句。
+     * 3. 解析完成后，将 SQL 语法树（SqlNode）转换为 Flink 内部的 Operation。
+     * 4. 仅支持解析单条 SQL 语句，否则抛出异常。
+     *
+     * @param statement 需要解析的 SQL 语句
+     * @return 解析后的操作列表（通常只包含单个操作）
+     * @throws TableException 当 SQL 解析失败或不受支持时抛出异常
      */
-    /**
-     * @授课老师(微信): yi_locus
-     * email: 156184212@qq.com
-     * 解析给定的 SQL 语句并返回操作列表。
-     *
-     * @param statement 要解析的 SQL 语句
-     * @return 包含解析后操作的列表（通常为单个操作）
-     * @throws TableException 如果解析失败或不支持查询
-    */
     @Override
     public List<Operation> parse(String statement) {
         // 获取 Calcite 解析器实例
         CalciteParser parser = calciteParserSupplier.get();
-        // 获取 Flink 规划器实例 用来校验层使用
+        // 获取 Flink 规划器实例（用于 SQL 语法校验）
         FlinkPlannerImpl planner = validatorSupplier.get();
 
-        // 尝试使用扩展解析器解析 SQL 语句为命令
+        // 先尝试使用扩展解析器解析 SQL 语句
         Optional<Operation> command = EXTENDED_PARSER.parse(statement);
         if (command.isPresent()) {
-            // 如果解析成功，直接返回包含单个命令的列表
+            // 如果扩展解析器成功解析，则直接返回结果
             return Collections.singletonList(command.get());
         }
 
-        // parse the sql query
-        // use parseSqlList here because we need to support statement end with ';' in sql client.
         /**
-         * 解析 SQL 查询（如果扩展解析器未返回结果）
-         * 使用 parseSqlList 方法是因为我们需要支持 SQL 客户端中以分号结尾的语句
+         * 使用 Calcite 解析器解析 SQL 语句
+         * 由于 Flink SQL Client 允许 SQL 语句以 `;` 结尾，因此使用 parseSqlList 方法进行解析
          */
         SqlNodeList sqlNodeList = parser.parseSqlList(statement);
-        //其实内部只会有一个解析语句
+        // 获取解析结果（通常只包含单个 SQL 语句）
         List<SqlNode> parsed = sqlNodeList.getList();
-        // 验证只解析了一个语句
-        Preconditions.checkArgument(parsed.size() == 1, "only single statement supported");
+
+        // 确保只解析了一条 SQL 语句，否则抛出异常
+        Preconditions.checkArgument(parsed.size() == 1, "仅支持单条 SQL 语句解析");
+
         /**
-         * 将解析的 SqlNode 转换为 Operation
+         * 将解析的 SqlNode 转换为 Flink 内部 Operation
          * 如果转换失败，则抛出 TableException 异常
          */
         return Collections.singletonList(
                 SqlNodeToOperationConversion.convert(planner, catalogManager, parsed.get(0))
-                        .orElseThrow(() -> new TableException("Unsupported query: " + statement)));
+                        .orElseThrow(() -> new TableException("不支持的 SQL 查询: " + statement)));
     }
 
+    /**
+     * 解析 SQL 标识符（如表名或列名）。
+     *
+     * @param identifier 需要解析的 SQL 标识符
+     * @return 解析后的未解析标识符（UnresolvedIdentifier）
+     */
     @Override
     public UnresolvedIdentifier parseIdentifier(String identifier) {
+        // 获取 Calcite 解析器实例
         CalciteParser parser = calciteParserSupplier.get();
+        // 解析 SQL 标识符
         SqlIdentifier sqlIdentifier = parser.parseIdentifier(identifier);
         return UnresolvedIdentifier.of(sqlIdentifier.names);
     }
 
+    /**
+     * 解析 SQL 表达式，并将其转换为 Flink 内部的 ResolvedExpression。
+     *
+     * 该方法支持输入类型（RowType）和可选的输出类型（LogicalType），
+     * 并会将解析后的 SQL 表达式转换为可执行的 RexNode。
+     *
+     * @param sqlExpression  需要解析的 SQL 表达式
+     * @param inputRowType   SQL 表达式的输入数据类型（RowType）
+     * @param outputType     （可选）SQL 表达式的目标输出类型（LogicalType）
+     * @return 解析后的 `ResolvedExpression`
+     * @throws ValidationException 当 SQL 表达式非法或无法解析时抛出异常
+     */
     @Override
     public ResolvedExpression parseSqlExpression(
             String sqlExpression, RowType inputRowType, @Nullable LogicalType outputType) {
         try {
+            // 创建 SQL 到 RexNode 的转换器
             final SqlToRexConverter sqlToRexConverter =
                     rexFactory.createSqlToRexConverter(inputRowType, outputType);
+            // 将 SQL 表达式转换为 RexNode
             final RexNode rexNode = sqlToRexConverter.convertToRexNode(sqlExpression);
+            // 获取解析后的逻辑数据类型
             final LogicalType logicalType = FlinkTypeFactory.toLogicalType(rexNode.getType());
-            // expand expression for serializable expression strings similar to views
+            // 展开表达式，以支持序列化
             final String sqlExpressionExpanded = sqlToRexConverter.expand(sqlExpression);
             return new RexNodeExpression(
                     rexNode,
@@ -154,21 +195,30 @@ public class ParserImpl implements Parser {
                     sqlExpressionExpanded);
         } catch (Throwable t) {
             throw new ValidationException(
-                    String.format("Invalid SQL expression: %s", sqlExpression), t);
+                    String.format("非法 SQL 表达式: %s", sqlExpression), t);
         }
     }
 
+    /**
+     * 获取 SQL 语法补全建议（自动补全）。
+     *
+     * @param statement 输入的 SQL 语句
+     * @param cursor    光标所在位置（用于提供合适的补全建议）
+     * @return SQL 语法补全建议数组
+     */
     public String[] getCompletionHints(String statement, int cursor) {
+        // 存储补全建议
         List<String> candidates =
                 new ArrayList<>(
                         Arrays.asList(EXTENDED_PARSER.getCompletionHints(statement, cursor)));
 
-        // use sql advisor
+        // 获取 SQL 校验器
         SqlAdvisorValidator validator = validatorSupplier.get().getSqlAdvisorValidator();
         SqlAdvisor advisor =
                 new SqlAdvisor(validator, validatorSupplier.get().config().getParserConfig());
         String[] replaced = new String[1];
 
+        // 获取 SQL 语法补全建议，并转换为字符串列表
         List<String> sqlHints =
                 advisor.getCompletionHints(statement, cursor, replaced).stream()
                         .map(item -> item.toIdentifier().toString())
@@ -179,7 +229,13 @@ public class ParserImpl implements Parser {
         return candidates.toArray(new String[0]);
     }
 
+    /**
+     * 获取 CatalogManager 实例，用于管理数据库和表的元数据。
+     *
+     * @return CatalogManager 实例
+     */
     public CatalogManager getCatalogManager() {
         return catalogManager;
     }
 }
+

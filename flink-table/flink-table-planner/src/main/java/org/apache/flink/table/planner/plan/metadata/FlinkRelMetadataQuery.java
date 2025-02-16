@@ -34,13 +34,24 @@ import java.util.Arrays;
 import java.util.Set;
 
 /**
- * A RelMetadataQuery that defines extended metadata handler in Flink, e.g ColumnInterval,
- * ColumnNullCount.
+ * FlinkRelMetadataQuery 是 Flink 扩展的 RelMetadataQuery 类，
+ * 主要用于获取 Flink 运行时 SQL 优化所需的元信息，例如：
+ * - 列值范围（ColumnInterval）
+ * - 过滤后的列值范围（FilteredColumnInterval）
+ * - 列的空值统计（ColumnNullCount）
+ * - 列的原始空值统计（ColumnOriginNullCount）
+ * - 唯一键分组（UniqueGroups）
+ * - 分布信息（FlinkDistribution）
+ * - 修改的单调性（ModifiedMonotonicity）
+ * - 窗口属性（WindowProperties）
+ * - Upsert 关键字（UpsertKeys）
  */
 public class FlinkRelMetadataQuery extends RelMetadataQuery {
-    // Serves as the handlers prototype of all the FlinkRelMetadataQuery instances.
+
+    // 静态 Handlers 实例，所有 FlinkRelMetadataQuery 实例都会共享
     private static final Handlers HANDLERS = new Handlers();
 
+    // 各种元信息查询处理器（Handler），用于计算对应的元数据信息
     private FlinkMetadata.ColumnInterval.Handler columnIntervalHandler;
     private FlinkMetadata.FilteredColumnInterval.Handler filteredColumnInterval;
     private FlinkMetadata.ColumnNullCount.Handler columnNullCountHandler;
@@ -52,19 +63,21 @@ public class FlinkRelMetadataQuery extends RelMetadataQuery {
     private FlinkMetadata.UpsertKeys.Handler upsertKeysHandler;
 
     /**
-     * Returns an instance of FlinkRelMetadataQuery. It ensures that cycles do not occur while
-     * computing metadata.
+     * 获取 FlinkRelMetadataQuery 实例。
+     * 该方法确保元数据计算过程中不会出现循环调用问题。
+     *
+     * @return FlinkRelMetadataQuery 的新实例
      */
     public static FlinkRelMetadataQuery instance() {
         return new FlinkRelMetadataQuery();
     }
 
     /**
-     * Reuse input metadataQuery instance if it could cast to FlinkRelMetadataQuery class, or create
-     * one if not.
+     * 复用已有的 RelMetadataQuery 实例，如果 mq 本身是 FlinkRelMetadataQuery 类型，则直接返回；
+     * 否则，创建一个新的 FlinkRelMetadataQuery 实例。
      *
-     * @param mq metadataQuery which try to reuse
-     * @return a FlinkRelMetadataQuery instance
+     * @param mq 需要复用的元数据查询实例
+     * @return FlinkRelMetadataQuery 实例
      */
     public static FlinkRelMetadataQuery reuseOrCreate(RelMetadataQuery mq) {
         if (mq instanceof FlinkRelMetadataQuery) {
@@ -74,7 +87,10 @@ public class FlinkRelMetadataQuery extends RelMetadataQuery {
         }
     }
 
-    /** Creates a FlinkRelMetadataQuery instance. */
+    /**
+     * 私有构造函数，初始化所有元数据查询处理器（Handler）。
+     * 由于 FlinkRelMetadataQuery 只能通过静态方法创建，因此构造函数被设置为 private。
+     */
     private FlinkRelMetadataQuery() {
         this.columnIntervalHandler = HANDLERS.columnIntervalHandler;
         this.filteredColumnInterval = HANDLERS.filteredColumnInterval;
@@ -87,7 +103,10 @@ public class FlinkRelMetadataQuery extends RelMetadataQuery {
         this.upsertKeysHandler = HANDLERS.upsertKeysHandler;
     }
 
-    /** Extended handlers. */
+    /**
+     * 内部静态类 Handlers，包含所有元数据查询处理器的初始实例。
+     * 这些处理器会在 FlinkRelMetadataQuery 创建时进行赋值，避免重复创建对象，提高性能。
+     */
     private static class Handlers {
         private FlinkMetadata.ColumnInterval.Handler columnIntervalHandler =
                 initialHandler(FlinkMetadata.ColumnInterval.Handler.class);
@@ -110,36 +129,30 @@ public class FlinkRelMetadataQuery extends RelMetadataQuery {
     }
 
     /**
-     * Returns the {@link FlinkMetadata.ColumnInterval} statistic.
+     * 获取指定列的值区间（Column Interval）。
      *
-     * @param rel the relational expression
-     * @param index the index of the given column
-     * @return the interval of the given column of a specified relational expression. Returns null
-     *     if interval cannot be estimated, Returns {@link
-     *     org.apache.flink.table.planner.plan.stats.EmptyValueInterval} if column values does not
-     *     contains any value except for null.
+     * @param rel 关系表达式（RelNode）
+     * @param index 目标列的索引
+     * @return 该列的值区间，可能返回 null 或空值区间（EmptyValueInterval）
      */
     public ValueInterval getColumnInterval(RelNode rel, int index) {
         for (; ; ) {
             try {
                 return columnIntervalHandler.getColumnInterval(rel, this, index);
             } catch (JaninoRelMetadataProvider.NoHandler e) {
+                // 如果没有处理器，重新生成并绑定
                 columnIntervalHandler = revise(e.relClass, FlinkMetadata.ColumnInterval.DEF);
             }
         }
     }
 
     /**
-     * Returns the {@link FlinkMetadata.ColumnInterval} of the given column under the given filter
-     * argument.
+     * 获取应用了过滤条件的列值区间（Filtered Column Interval）。
      *
-     * @param rel the relational expression
-     * @param columnIndex the index of the given column
-     * @param filterArg the index of the filter argument
-     * @return the interval of the given column of a specified relational expression. Returns null
-     *     if interval cannot be estimated, Returns {@link
-     *     org.apache.flink.table.planner.plan.stats.EmptyValueInterval} if column values does not
-     *     contains any value except for null.
+     * @param rel 关系表达式（RelNode）
+     * @param columnIndex 目标列的索引
+     * @param filterArg 过滤条件参数索引
+     * @return 该列的值区间，可能返回 null 或空值区间（EmptyValueInterval）
      */
     public ValueInterval getFilteredColumnInterval(RelNode rel, int columnIndex, int filterArg) {
         for (; ; ) {
@@ -147,157 +160,163 @@ public class FlinkRelMetadataQuery extends RelMetadataQuery {
                 return filteredColumnInterval.getFilteredColumnInterval(
                         rel, this, columnIndex, filterArg);
             } catch (JaninoRelMetadataProvider.NoHandler e) {
-                filteredColumnInterval =
-                        revise(e.relClass, FlinkMetadata.FilteredColumnInterval.DEF);
+                // 重新生成处理器
+                filteredColumnInterval = revise(e.relClass, FlinkMetadata.FilteredColumnInterval.DEF);
             }
         }
     }
 
+
     /**
-     * Returns the null count of the given column.
+     * 获取指定列的空值数量 (Null Count)。
      *
-     * @param rel the relational expression
-     * @param index the index of the given column
-     * @return the null count of the given column if can be estimated, else return null.
+     * @param rel 关系表达式（RelNode）
+     * @param index 目标列的索引
+     * @return 该列的空值数量，如果无法估算，则返回 null。
      */
     public Double getColumnNullCount(RelNode rel, int index) {
         for (; ; ) {
             try {
                 return columnNullCountHandler.getColumnNullCount(rel, this, index);
             } catch (JaninoRelMetadataProvider.NoHandler e) {
+                // 如果当前 Handler 为空，则重新生成一个 Handler
                 columnNullCountHandler = revise(e.relClass, FlinkMetadata.ColumnNullCount.DEF);
             }
         }
     }
 
     /**
-     * Returns origin null count of the given column.
+     * 获取原始数据中的指定列的空值数量 (Origin Null Count)。
      *
-     * @param rel the relational expression
-     * @param index the index of the given column
-     * @return the null count of the given column if can be estimated, else return null.
+     * @param rel 关系表达式（RelNode）
+     * @param index 目标列的索引
+     * @return 该列的原始空值数量，如果无法估算，则返回 null。
      */
     public Double getColumnOriginNullCount(RelNode rel, int index) {
         for (; ; ) {
             try {
                 return columnOriginNullCountHandler.getColumnOriginNullCount(rel, this, index);
             } catch (JaninoRelMetadataProvider.NoHandler e) {
-                columnOriginNullCountHandler =
-                        revise(e.relClass, FlinkMetadata.ColumnOriginNullCount.DEF);
+                // 重新生成 ColumnOriginNullCount Handler
+                columnOriginNullCountHandler = revise(e.relClass, FlinkMetadata.ColumnOriginNullCount.DEF);
             }
         }
     }
 
     /**
-     * Returns the (minimum) unique groups of the given columns.
+     * 获取指定列的唯一分组 (Minimum Unique Groups)。
+     * 该方法用于计算最小唯一列集合，即使部分列组合可以唯一标识数据，也会返回该最小子集。
      *
-     * @param rel the relational expression
-     * @param columns the given columns in a specified relational expression. The given columns
-     *     should not be null.
-     * @return the (minimum) unique columns which should be a sub-collection of the given columns,
-     *     and should not be null or empty. If none unique columns can be found, return the given
-     *     columns.
+     * @param rel 关系表达式（RelNode）
+     * @param columns 需要计算唯一性的列集合，不能为 null。
+     * @return 该列集合中的最小唯一分组，如果找不到唯一列，则返回原始列集合。
      */
     public ImmutableBitSet getUniqueGroups(RelNode rel, ImmutableBitSet columns) {
         for (; ; ) {
             try {
+                // 确保输入列集合不为空
                 Preconditions.checkArgument(columns != null);
                 if (columns.isEmpty()) {
                     return columns;
                 }
-                ImmutableBitSet uniqueGroups =
-                        uniqueGroupsHandler.getUniqueGroups(rel, this, columns);
+                ImmutableBitSet uniqueGroups = uniqueGroupsHandler.getUniqueGroups(rel, this, columns);
+                // 确保唯一列不为空，且是输入列集合的子集
                 Preconditions.checkArgument(uniqueGroups != null && !uniqueGroups.isEmpty());
                 Preconditions.checkArgument(columns.contains(uniqueGroups));
                 return uniqueGroups;
             } catch (JaninoRelMetadataProvider.NoHandler e) {
+                // 重新生成 UniqueGroups Handler
                 uniqueGroupsHandler = revise(e.relClass, FlinkMetadata.UniqueGroups.DEF);
             }
         }
     }
 
     /**
-     * Returns the {@link FlinkRelDistribution} statistic.
+     * 获取关系表达式的 Flink 物理分布信息 (FlinkRelDistribution)。
      *
-     * @param rel the relational expression
-     * @return description of how the rows in the relational expression are physically distributed
+     * @param rel 关系表达式（RelNode）
+     * @return 物理分布信息，例如 Hash 分区、广播、单一分区等。
      */
     public FlinkRelDistribution flinkDistribution(RelNode rel) {
         for (; ; ) {
             try {
                 return distributionHandler.flinkDistribution(rel, this);
             } catch (JaninoRelMetadataProvider.NoHandler e) {
+                // 重新生成 FlinkDistribution Handler
                 distributionHandler = revise(e.relClass, FlinkMetadata.FlinkDistribution.DEF);
             }
         }
     }
 
     /**
-     * Returns the {@link RelModifiedMonotonicity} statistic.
+     * 获取关系表达式的单调性 (Modified Monotonicity)。
+     * 单调性描述了数据如何变化，例如是否是严格递增、递减或无序等。
      *
-     * @param rel the relational expression
-     * @return the monotonicity for the corresponding RelNode
+     * @param rel 关系表达式（RelNode）
+     * @return 该 `RelNode` 的单调性信息。
      */
     public RelModifiedMonotonicity getRelModifiedMonotonicity(RelNode rel) {
         for (; ; ) {
             try {
                 return modifiedMonotonicityHandler.getRelModifiedMonotonicity(rel, this);
             } catch (JaninoRelMetadataProvider.NoHandler e) {
-                modifiedMonotonicityHandler =
-                        revise(e.relClass, FlinkMetadata.ModifiedMonotonicity.DEF);
+                // 重新生成 ModifiedMonotonicity Handler
+                modifiedMonotonicityHandler = revise(e.relClass, FlinkMetadata.ModifiedMonotonicity.DEF);
             }
         }
     }
 
     /**
-     * Returns the {@link RelWindowProperties} statistic.
+     * 获取关系表达式的窗口属性 (RelWindowProperties)。
+     * 该方法用于查询窗口计算时的窗口边界、分区键等信息。
      *
-     * @param rel the relational expression
-     * @return the window properties for the corresponding RelNode
+     * @param rel 关系表达式（RelNode）
+     * @return 窗口属性信息，例如窗口大小、滑动步长等。
      */
     public RelWindowProperties getRelWindowProperties(RelNode rel) {
         for (; ; ) {
             try {
                 return windowPropertiesHandler.getWindowProperties(rel, this);
             } catch (JaninoRelMetadataProvider.NoHandler e) {
+                // 重新生成 WindowProperties Handler
                 windowPropertiesHandler = revise(e.relClass, FlinkMetadata.WindowProperties.DEF);
             }
         }
     }
 
     /**
-     * Determines the set of upsert minimal keys for this expression. A key is represented as an
-     * {@link org.apache.calcite.util.ImmutableBitSet}, where each bit position represents a 0-based
-     * output column ordinal.
+     * 获取该关系表达式的 Upsert 关键列集合。
+     * Upsert 键是用于唯一标识数据的键集合，类似于主键，但在流式环境中可能随数据变化。
      *
-     * <p>Different from the unique keys: In distributed streaming computing, one record may be
-     * divided into RowKind.UPDATE_BEFORE and RowKind.UPDATE_AFTER. If a key changing join is
-     * connected downstream, the two records will be divided into different tasks, resulting in
-     * disorder. In this case, the downstream cannot rely on the order of the original key. So in
-     * this case, it has unique keys in the traditional sense, but it doesn't have upsert keys.
-     *
-     * @return set of keys, or null if this information cannot be determined (whereas empty set
-     *     indicates definitely no keys at all)
+     * @param rel 关系表达式（RelNode）
+     * @return 该 `RelNode` 的 Upsert 关键列集合，如果无法确定，则返回 null。
      */
     public Set<ImmutableBitSet> getUpsertKeys(RelNode rel) {
         for (; ; ) {
             try {
                 return upsertKeysHandler.getUpsertKeys(rel, this);
             } catch (JaninoRelMetadataProvider.NoHandler e) {
+                // 重新生成 UpsertKeys Handler
                 upsertKeysHandler = revise(e.relClass, FlinkMetadata.UpsertKeys.DEF);
             }
         }
     }
 
     /**
-     * Determines the set of upsert minimal keys in a single key group range, which means can ignore
-     * exchange by partition keys.
+     * 获取在单个 Key Group 范围内的 Upsert 关键列集合。
+     * 该方法可以忽略分区键 (Partition Keys) 所造成的影响，仅在本地范围内计算 Upsert Key。
      *
-     * <p>Some optimizations can rely on this ability to do upsert in a single key group range.
+     * <p> 该方法主要用于优化器在分布式环境下进行 Upsert 操作时，确定 Key Group 内唯一标识数据的最小列集合。
+     *
+     * @param rel 关系表达式（RelNode）
+     * @param partitionKeys 参与分区的列索引数组
+     * @return 该 `RelNode` 在指定 Key Group 内的 Upsert 关键列集合。
      */
     public Set<ImmutableBitSet> getUpsertKeysInKeyGroupRange(RelNode rel, int[] partitionKeys) {
+        // 检查当前 RelNode 是否是 Exchange 类型（表示分区交换）
         if (rel instanceof Exchange) {
             Exchange exchange = (Exchange) rel;
+            // 如果 Exchange 分区键与指定 partitionKeys 相同，则忽略 Exchange 层，直接获取其输入的 Upsert Keys
             if (Arrays.equals(
                     exchange.getDistribution().getKeys().stream()
                             .mapToInt(Integer::intValue)
